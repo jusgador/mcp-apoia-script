@@ -59,6 +59,7 @@ Arquivo principal: [`apoia-mcp-assistant.user.js`](apoia-mcp-assistant.user.js)
 
 ## 🗒️ Histórico de versões
 
+- **1.4.6** — `@updateURL`/`@downloadURL` apontando para o raw do GitHub (auto-update do Tampermonkey — requer repositório **público**).
 - **1.4.5** — Tratamento de erros de serviço unificado em **todas** as ferramentas (mensagem amigável + “Tentar novamente”), inclusive no caminho de erro *lançado* (`isError`/HTTP 5xx).
 - **1.4.4** — Card amigável para **“Peça não encontrada”**; tradução de erros de serviço (ex.: `fetch failed` em *Precedentes*) para mensagem clara + retry.
 - **1.4.3** — **Auto-retry** no *Ler Peça* para erro transitório do Codex; limpeza dos presets internos não utilizados.
