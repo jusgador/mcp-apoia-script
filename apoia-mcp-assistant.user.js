@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.4.6
+// @version      1.4.7
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -63,7 +63,9 @@
     alert: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
     insert: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>`,
     refresh: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
-    
+    maximize: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
+    minimize: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
+
     // Ícones dos Modos de Tema
     moon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`,
     sun: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`,
@@ -1084,6 +1086,67 @@
       overflow-y: auto;
     }
 
+    .results-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-icon-sm {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 3px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn-icon-sm:hover {
+      background: var(--bg-surface);
+      color: var(--text-main);
+      border-color: var(--border-color);
+    }
+
+    .btn-icon-sm.active {
+      background: var(--bg-surface);
+      color: var(--primary-accent);
+      border-color: var(--border-color);
+    }
+
+    /* Modo expandido: os resultados ocupam toda a altura do painel,
+       ocultando busca, grade de ferramentas e o formulário acima. */
+    .apoia-drawer.results-maximized .search-box,
+    .apoia-drawer.results-maximized .tools-grid,
+    .apoia-drawer.results-maximized .runner-head,
+    .apoia-drawer.results-maximized #dynamicNoticeContainer,
+    .apoia-drawer.results-maximized #dynamicFormContainer,
+    .apoia-drawer.results-maximized .runner-buttons {
+      display: none !important;
+    }
+
+    .apoia-drawer.results-maximized .runner-panel {
+      flex: 1;
+      min-height: 0;
+      padding: 0;
+      border: none;
+      background: transparent;
+      gap: 0;
+    }
+
+    .apoia-drawer.results-maximized .results-box {
+      flex: 1;
+      min-height: 0;
+      margin-top: 0;
+    }
+
+    .apoia-drawer.results-maximized .results-content {
+      flex: 1;
+      max-height: none;
+    }
+
     .error-card {
       background: var(--danger-bg);
       border: 1px solid var(--danger);
@@ -1631,10 +1694,13 @@
                   <div class="results-meta">
                     Resultado <span class="results-time" id="resultsTime"></span>
                   </div>
-                  <div class="results-tabs">
-                    <button class="tab-btn active" data-view="visual">Visual</button>
-                    <button class="tab-btn" data-view="markdown">Markdown</button>
-                    <button class="tab-btn" data-view="json">JSON</button>
+                  <div class="results-header-actions">
+                    <div class="results-tabs">
+                      <button class="tab-btn active" data-view="visual">Visual</button>
+                      <button class="tab-btn" data-view="markdown">Markdown</button>
+                      <button class="tab-btn" data-view="json">JSON</button>
+                    </div>
+                    <button class="btn-icon-sm" id="btnMaximizeResults" title="Expandir resultados para ocupar todo o painel">${ICONS.maximize}</button>
                   </div>
                 </div>
                 <div class="results-content" id="resultsContent"></div>
@@ -1900,6 +1966,7 @@
 
       this.renderDynamicForm(tool);
       this.shadow.getElementById('resultsBox').style.display = 'none';
+      this.toggleMaximizeResults(false);
       runnerPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
@@ -2782,6 +2849,25 @@
       this.shadow.getElementById('btnHistory').classList.remove('active');
     }
 
+    // Alterna o modo expandido dos resultados: oculta o formulário e a grade
+    // de ferramentas para que os documentos ocupem toda a altura do painel.
+    toggleMaximizeResults(force) {
+      const drawer = this.shadow.getElementById('drawer');
+      const btn = this.shadow.getElementById('btnMaximizeResults');
+      const shouldMaximize = typeof force === 'boolean'
+        ? force
+        : !drawer.classList.contains('results-maximized');
+
+      drawer.classList.toggle('results-maximized', shouldMaximize);
+      if (btn) {
+        btn.classList.toggle('active', shouldMaximize);
+        btn.innerHTML = shouldMaximize ? ICONS.minimize : ICONS.maximize;
+        btn.title = shouldMaximize
+          ? 'Recolher resultados'
+          : 'Expandir resultados para ocupar todo o painel';
+      }
+    }
+
     escapeHtml(str) {
       if (typeof str !== 'string') return str;
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -2878,6 +2964,7 @@
 
       this.shadow.getElementById('btnCopyResult').addEventListener('click', () => this.copyCurrentResult());
       this.shadow.getElementById('btnInsertCursor').addEventListener('click', () => this.insertIntoActiveCursor());
+      this.shadow.getElementById('btnMaximizeResults').addEventListener('click', () => this.toggleMaximizeResults());
 
       const btnSettings = this.shadow.getElementById('btnSettings');
       const settingsPanel = this.shadow.getElementById('settingsPanel');
