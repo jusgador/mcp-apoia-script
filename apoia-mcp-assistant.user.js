@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -25,7 +25,9 @@
   // ==========================================
   // CONFIGURAÇÃO E CONSTANTES
   // ==========================================
-  const DEFAULT_TOKEN = '7cb6b39c9c3f4a31b32a9fc31ba0c4da';
+  // Sem token embutido: cada usuário informa o seu nas Configurações (⚙),
+  // obtido no portal do Apoia. Ele fica salvo localmente via GM_setValue.
+  const DEFAULT_TOKEN = '';
   const DEFAULT_BASE_URL = 'https://apoia.pdpj.jus.br/api/mcp/mcp';
   const TOKEN_PORTAL_URL = 'https://apoia.pdpj.jus.br/mcp';
   const LIBRARY_PORTAL_URL = 'https://apoia.pdpj.jus.br';
