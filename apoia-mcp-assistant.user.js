@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.4.7
+// @version      1.5.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -72,43 +72,44 @@
     sepia: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6"/><path d="M9 11h6"/></svg>`
   };
 
-  // defaultArgs pré-preenche cada formulário com um exemplo funcional.
+  // defaultArgs traz apenas defaults neutros de parâmetros técnicos (limites,
+  // modos, paginação) — os campos de conteúdo ficam vazios, guiados pelos placeholders.
   const TOOL_META = {
     processMetadata: {
       category: 'processos',
       displayName: 'Metadados Processuais',
-      defaultArgs: { processNumber: '0808047-41.2018.4.05.8109' }
+      defaultArgs: {}
     },
     piecesText: {
       category: 'processos',
       displayName: 'Texto de Peças Processuais',
-      defaultArgs: { processNumber: '0808047-41.2018.4.05.8109', pieceIdArray: ['5c0b9c1e-2b3f-56a4-b9d0-d99567e1ebda'] }
+      defaultArgs: {}
     },
     libraryDocument: {
       category: 'processos',
       displayName: 'Documentos da Minha Biblioteca',
       helpNotice: 'Recupera o conteúdo de modelos, minutas, teses e documentos personalizados salvos na sua Biblioteca do Apoia PDPJ.',
-      defaultArgs: { documentIdArray: [1] }
+      defaultArgs: {}
     },
     pangea: {
       category: 'jurisprudencia',
       displayName: 'Pangea (STF/STJ)',
-      defaultArgs: { query: 'dano moral atraso voo', maxItems: 5 }
+      defaultArgs: { maxItems: 5 }
     },
     semanticSearch: {
       category: 'jurisprudencia',
       displayName: 'Busca Semântica / Híbrida',
-      defaultArgs: { query: 'reajuste plano de saude faixa etaria', searchType: 'hybrid', limit: 5 }
+      defaultArgs: { searchType: 'hybrid', limit: 5 }
     },
     precedent: {
       category: 'jurisprudencia',
       displayName: 'Precedentes Jurisprudenciais',
-      defaultArgs: { searchQuery: 'dano moral in re ipsa E inscricao indevida', page: 1 }
+      defaultArgs: { page: 1 }
     },
     leadingCaseSearch: {
       category: 'jurisprudencia',
       displayName: 'Leading Case (Paradigma)',
-      defaultArgs: { numero: '1078' }
+      defaultArgs: {}
     },
     currentDate: {
       category: 'prazos',
@@ -118,17 +119,17 @@
     dateDiff: {
       category: 'prazos',
       displayName: 'Diferença de Prazos (Datas)',
-      defaultArgs: { startDate: '10/01/2020', endDate: '14/08/2026' }
+      defaultArgs: {}
     },
     addDate: {
       category: 'prazos',
       displayName: 'Somar/Subtrair Prazos',
-      defaultArgs: { startDate: '14/08/2026', dias: 15, meses: 0, anos: 0 }
+      defaultArgs: {}
     },
     calculator: {
       category: 'calculo',
       displayName: 'Calculadora de Expressões',
-      defaultArgs: { items: [{ expression: '1500 * (1 + 0.01)^6' }] }
+      defaultArgs: {}
     }
   };
 
@@ -873,6 +874,32 @@
       border-bottom: 1px solid var(--border-color);
     }
 
+    /* Modo ferramenta selecionada: oculta busca e grade para o formulário
+       ocupar o painel inteiro; o retorno é feito pelo botão Voltar ou Esc. */
+    .apoia-drawer.tool-view .search-box,
+    .apoia-drawer.tool-view .tools-grid {
+      display: none;
+    }
+
+    .btn-back {
+      align-self: flex-start;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: var(--primary-accent);
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+    }
+
+    .btn-back:hover {
+      text-decoration: underline;
+    }
+
     .runner-title {
       font-size: 14px;
       font-weight: 700;
@@ -1120,6 +1147,7 @@
        ocultando busca, grade de ferramentas e o formulário acima. */
     .apoia-drawer.results-maximized .search-box,
     .apoia-drawer.results-maximized .tools-grid,
+    .apoia-drawer.results-maximized .btn-back,
     .apoia-drawer.results-maximized .runner-head,
     .apoia-drawer.results-maximized #dynamicNoticeContainer,
     .apoia-drawer.results-maximized #dynamicFormContainer,
@@ -1671,6 +1699,7 @@
             <div class="tools-grid" id="toolsGrid"></div>
 
             <div class="runner-panel" id="runnerPanel" style="display: none;">
+              <button type="button" class="btn-back" id="btnBackToTools" title="Voltar à lista de ferramentas (Esc)">← Ferramentas</button>
               <div class="runner-head">
                 <div class="runner-title" id="runnerTitle">Ferramenta</div>
                 <div class="runner-desc" id="runnerDesc"></div>
@@ -1937,7 +1966,7 @@
 
     selectTool(tool) {
       this.selectedTool = tool;
-      this.renderToolsGrid(this.shadow.getElementById('toolSearchInput').value);
+      this.shadow.getElementById('drawer').classList.add('tool-view');
 
       const runnerPanel = this.shadow.getElementById('runnerPanel');
       const runnerTitle = this.shadow.getElementById('runnerTitle');
@@ -1967,7 +1996,16 @@
       this.renderDynamicForm(tool);
       this.shadow.getElementById('resultsBox').style.display = 'none';
       this.toggleMaximizeResults(false);
-      runnerPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      this.shadow.getElementById('drawerBody').scrollTop = 0;
+    }
+
+    backToToolsList() {
+      this.selectedTool = null;
+      this.toggleMaximizeResults(false);
+      this.shadow.getElementById('drawer').classList.remove('tool-view');
+      this.shadow.getElementById('runnerPanel').style.display = 'none';
+      this.shadow.getElementById('resultsBox').style.display = 'none';
+      this.renderToolsGrid(this.shadow.getElementById('toolSearchInput').value);
     }
 
     renderDynamicForm(tool) {
@@ -2876,6 +2914,7 @@
     registerEvents() {
       this.shadow.getElementById('btnClose').addEventListener('click', () => this.toggleDrawer(false));
       this.shadow.getElementById('drawerBackdrop').addEventListener('click', () => this.toggleDrawer(false));
+      this.shadow.getElementById('btnBackToTools').addEventListener('click', () => this.backToToolsList());
 
       // Botão de alternância de tema no cabeçalho
       this.shadow.getElementById('btnThemeToggle').addEventListener('click', () => this.cycleTheme());
@@ -2923,8 +2962,11 @@
           this.toggleDrawer();
         } else if (e.key === 'Escape') {
           const overlay = this.shadow.getElementById('pieceViewerOverlay');
+          const drawer = this.shadow.getElementById('drawer');
           if (overlay && overlay.style.display === 'flex') {
             this.closePieceViewer();
+          } else if (this.isOpen && drawer.classList.contains('tool-view')) {
+            this.backToToolsList();
           } else if (this.isOpen) {
             this.toggleDrawer(false);
           }
@@ -2943,7 +2985,7 @@
           tab.classList.add('active');
           this.currentTab = tab.dataset.tab;
           this.switchViewToRunner();
-          this.renderToolsGrid(searchInput.value);
+          this.backToToolsList();
         });
       });
 
