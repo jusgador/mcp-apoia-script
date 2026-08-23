@@ -1,6 +1,6 @@
-# Apoia PDPJ — Assistente MCP (Userscript Tampermonkey)
+# Apoia — Assistente MCP (Userscript Tampermonkey)
 
-Painel lateral acionável por **`Alt + M`** que expõe as ferramentas de inteligência e automação **MCP (Model Context Protocol)** da plataforma **Apoia / PDPJ** (`https://apoia.pdpj.jus.br`) diretamente no navegador, via **Tampermonkey**.
+Painel lateral acionável por **`Alt + M`** que expõe as ferramentas de inteligência e automação **MCP (Model Context Protocol)** da plataforma **Apoia** diretamente no navegador, via **Tampermonkey**.
 
 Arquivo principal: [`apoia-mcp-assistant.user.js`](apoia-mcp-assistant.user.js)
 
