@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.5.1
+// @version      1.5.2
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -155,6 +155,31 @@
   // ==========================================
   // CLIENTE DE REDE MCP
   // ==========================================
+  // Serialização JSON imune ao Array.prototype.toJSON injetado por frameworks
+  // antigos da página hospedeira (Prototype.js 1.6 do PJe): com ele presente,
+  // JSON.stringify transforma qualquer array numa STRING com o JSON dentro
+  // ("pieceIdArray":"[\"x\"]") e o servidor MCP rejeita com -32602 «expected
+  // array, received string». Arrays e objetos são montados à mão; só primitivos
+  // passam pelo JSON.stringify nativo (toJSON não se aplica a primitivos).
+  function safeJsonStringify(v) {
+    if (v === undefined || typeof v === 'function') return undefined;
+    if (Array.isArray(v)) {
+      return '[' + Array.prototype.map.call(v, (x) => {
+        const s = safeJsonStringify(x);
+        return s === undefined ? 'null' : s;
+      }).join(',') + ']';
+    }
+    if (v !== null && typeof v === 'object') {
+      const partes = [];
+      for (const k of Object.keys(v)) {
+        const s = safeJsonStringify(v[k]);
+        if (s !== undefined) partes.push(JSON.stringify(k) + ':' + s);
+      }
+      return '{' + partes.join(',') + '}';
+    }
+    return JSON.stringify(v);
+  }
+
   class McpClient {
     constructor() {
       this.initUrl();
@@ -259,7 +284,11 @@
           params: params
         };
 
-        const postBody = JSON.stringify(payload);
+        // JSON.stringify é inseguro para arrays em páginas com Prototype.js
+        // (ex.: PJe, que define Array.prototype.toJSON — pieceIdArray virava
+        // STRING e o servidor rejeitava com -32602 "expected array, received
+        // string", mesmo depois da correção 1.4.1). Serialização à mão.
+        const postBody = safeJsonStringify(payload);
 
         const handleResponseText = (status, text) => {
           if (status === 401) {

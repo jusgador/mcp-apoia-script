@@ -59,6 +59,7 @@ Arquivo principal: [`apoia-mcp-assistant.user.js`](apoia-mcp-assistant.user.js)
 
 ## 🗒️ Histórico de versões
 
+- **1.5.2** — Correção definitiva do «expected array, received string» (MCP error -32602): em páginas com Prototype.js antigo (ex.: PJe), `Array.prototype.toJSON` fazia o `JSON.stringify` do payload JSON-RPC serializar arrays como *string* — a 1.4.1 corrigia o chamador, mas a corrupção acontecia depois, na serialização. O payload agora usa `safeJsonStringify` (arrays/objetos montados à mão).
 - **1.4.6** — `@updateURL`/`@downloadURL` apontando para o raw do GitHub (auto-update do Tampermonkey — requer repositório **público**).
 - **1.4.5** — Tratamento de erros de serviço unificado em **todas** as ferramentas (mensagem amigável + “Tentar novamente”), inclusive no caminho de erro *lançado* (`isError`/HTTP 5xx).
 - **1.4.4** — Card amigável para **“Peça não encontrada”**; tradução de erros de serviço (ex.: `fetch failed` em *Precedentes*) para mensagem clara + retry.
