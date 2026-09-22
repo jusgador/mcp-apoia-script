@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.5.2
+// @version      1.5.3
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -1182,7 +1182,9 @@
     .apoia-drawer.results-maximized .runner-head,
     .apoia-drawer.results-maximized #dynamicNoticeContainer,
     .apoia-drawer.results-maximized #dynamicFormContainer,
-    .apoia-drawer.results-maximized .runner-buttons {
+    .apoia-drawer.results-maximized .runner-buttons,
+    .apoia-drawer.results-maximized #settingsPanel,
+    .apoia-drawer.results-maximized #historyPanel {
       display: none !important;
     }
 
@@ -1944,6 +1946,30 @@
       } catch (err) {
         console.warn('[Apoia MCP] Erro ao carregar ferramentas:', err);
         this.updateTokenStatus(false, err.message || 'Token expirado ou inválido.');
+        if (err.isAuthError) this.openSettingsPanel({ focusToken: true });
+      }
+    }
+
+    // Exibe o painel de Configurações (fechando Histórico e o modo expandido)
+    // e, opcionalmente, posiciona o cursor no campo de token para renovação rápida.
+    openSettingsPanel({ focusToken = false } = {}) {
+      const settingsPanel = this.shadow.getElementById('settingsPanel');
+      const tokenInput = this.shadow.getElementById('cfgTokenInput');
+
+      this.toggleMaximizeResults(false);
+      this.shadow.getElementById('historyPanel').style.display = 'none';
+      this.shadow.getElementById('btnHistory').classList.remove('active');
+
+      settingsPanel.style.display = 'flex';
+      this.shadow.getElementById('btnSettings').classList.add('active');
+      tokenInput.value = this.client.token;
+      this.shadow.getElementById('cfgUrlInput').value = this.client.baseUrl;
+      this.shadow.getElementById('cfgThemeSelect').value = this.currentTheme;
+
+      if (focusToken && this.isOpen) {
+        settingsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        tokenInput.focus();
+        tokenInput.select();
       }
     }
 
@@ -2270,10 +2296,11 @@
           resultsContent.innerHTML = `
             <div class="error-card">
               <div class="error-card-title">${ICONS.alert} Token expirado ou não autorizado</div>
-              <div class="error-card-body">Seu token expirou ou não está autorizado. Obtenha um novo token no portal do Apoia.</div>
+              <div class="error-card-body">Seu token expirou ou não está autorizado. Obtenha um novo token no portal do Apoia e cole-o no campo de Configurações aberto abaixo.</div>
               <div style="margin-top: 4px;"><a href="${TOKEN_PORTAL_URL}" target="_blank" class="token-link-btn">Acessar Portal Apoia para Renovar Token ${ICONS.externalLink}</a></div>
             </div>
           `;
+          this.openSettingsPanel({ focusToken: true });
         } else {
           const info = this.interpretServiceError(err.message || 'Falha ao executar ferramenta no servidor Apoia');
           resultsContent.innerHTML = `
@@ -2283,8 +2310,8 @@
             </div>
           `;
           this.appendRetryButton(resultsContent, () => this.executeCurrentTool());
+          resultsBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
-        resultsBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -3043,18 +3070,11 @@
       const settingsPanel = this.shadow.getElementById('settingsPanel');
       btnSettings.addEventListener('click', () => {
         const isShown = settingsPanel.style.display === 'flex';
-        this.shadow.getElementById('historyPanel').style.display = 'none';
-        this.shadow.getElementById('btnHistory').classList.remove('active');
-
         if (isShown) {
           settingsPanel.style.display = 'none';
           btnSettings.classList.remove('active');
         } else {
-          settingsPanel.style.display = 'flex';
-          btnSettings.classList.add('active');
-          this.shadow.getElementById('cfgTokenInput').value = this.client.token;
-          this.shadow.getElementById('cfgUrlInput').value = this.client.baseUrl;
-          this.shadow.getElementById('cfgThemeSelect').value = this.currentTheme;
+          this.openSettingsPanel();
         }
       });
 
@@ -3084,6 +3104,7 @@
           historyPanel.style.display = 'none';
           btnHistory.classList.remove('active');
         } else {
+          this.toggleMaximizeResults(false);
           historyPanel.style.display = 'flex';
           btnHistory.classList.add('active');
           this.renderHistoryList();
