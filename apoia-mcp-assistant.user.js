@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.5.3
+// @version      1.5.4
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -1208,6 +1208,28 @@
       max-height: none;
     }
 
+    /* No modo expandido, também some a barra de token e as abas de categoria,
+       o corpo perde o respiro lateral e a linha do tempo deixa de ter rolagem
+       própria (uma única rolagem, a do resultado). */
+    .apoia-drawer.results-maximized .token-bar,
+    .apoia-drawer.results-maximized .drawer-nav {
+      display: none !important;
+    }
+
+    .apoia-drawer.results-maximized .drawer-body {
+      padding: 8px;
+      overflow: hidden;
+    }
+
+    .apoia-drawer.results-maximized .results-box {
+      border-radius: var(--radius-sm);
+    }
+
+    .apoia-drawer.results-maximized .proc-timeline {
+      max-height: none;
+      overflow: visible;
+    }
+
     .error-card {
       background: var(--danger-bg);
       border: 1px solid var(--danger);
@@ -1393,8 +1415,10 @@
 
     .proc-movs-header {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
+      gap: 6px;
       margin-bottom: 8px;
     }
 
@@ -2462,7 +2486,7 @@
               </div>
               <div style="display: flex; align-items: center; gap: 6px;">
                 <input type="text" class="proc-movs-filter" placeholder="Filtrar eventos..." />
-                <button class="btn btn-secondary btn-small btn-toggle-movs">Ver Todas</button>
+                <button class="btn btn-secondary btn-small btn-toggle-movs"></button>
               </div>
             </div>
             <div class="proc-timeline"></div>
@@ -2472,7 +2496,14 @@
         const timelineEl = card.querySelector('.proc-timeline');
         const filterInput = card.querySelector('.proc-movs-filter');
         const toggleBtn = card.querySelector('.btn-toggle-movs');
-        let showAll = false;
+        // No modo expandido a linha do tempo já começa completa.
+        let showAll = this.shadow.getElementById('drawer').classList.contains('results-maximized');
+        const MOVS_RECENTES = 8;
+
+        const updateToggleLabel = () => {
+          toggleBtn.style.display = allMovs.length > MOVS_RECENTES ? '' : 'none';
+          toggleBtn.textContent = showAll ? `Ver Recentes (${MOVS_RECENTES})` : `Ver Todas (${allMovs.length})`;
+        };
 
         const renderTimelineItems = () => {
           timelineEl.innerHTML = '';
@@ -2485,7 +2516,9 @@
             return desc.includes(filterTerm) || docs.includes(filterTerm);
           });
 
-          const itemsToDisplay = showAll ? filtered : filtered.slice(0, 8);
+          // Com filtro ativo, exibe todas as correspondências (a busca já varre
+          // o processo inteiro, não faz sentido cortar em 8).
+          const itemsToDisplay = (showAll || filterTerm) ? filtered : filtered.slice(0, MOVS_RECENTES);
 
           if (itemsToDisplay.length === 0) {
             timelineEl.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 8px;">Nenhuma movimentação corresponde ao filtro.</div>`;
@@ -2539,10 +2572,19 @@
         filterInput.addEventListener('input', () => renderTimelineItems());
         toggleBtn.addEventListener('click', () => {
           showAll = !showAll;
-          toggleBtn.textContent = showAll ? 'Ver Recentes (8)' : `Ver Todas (${allMovs.length})`;
+          updateToggleLabel();
+          renderTimelineItems();
+        });
+        // Expandir/recolher o painel alterna junto entre todas e recentes.
+        card.classList.add('has-movs-toggle');
+        card.addEventListener('apoia-maximize', (e) => {
+          if (showAll === e.detail) return;
+          showAll = e.detail;
+          updateToggleLabel();
           renderTimelineItems();
         });
 
+        updateToggleLabel();
         renderTimelineItems();
         container.appendChild(card);
       });
@@ -2962,6 +3004,10 @@
           ? 'Recolher resultados'
           : 'Expandir resultados para ocupar todo o painel';
       }
+
+      this.shadow.querySelectorAll('#resultsContent .has-movs-toggle').forEach(card => {
+        card.dispatchEvent(new CustomEvent('apoia-maximize', { detail: shouldMaximize }));
+      });
     }
 
     escapeHtml(str) {
