@@ -33,9 +33,11 @@ Arquivo principal: [`apoia-mcp-assistant.user.js`](apoia-mcp-assistant.user.js)
 |---|---|---|
 | **Processos & Peças** | Metadados Processuais | Metadados de um processo pelo número. |
 | | Texto de Peças Processuais | Texto integral de uma ou mais peças. |
+| | Decisões (Julia TRF5) | Sentenças, acórdãos de TR/TRU e ementas do TRF5 indexados na Julia, para um ou mais processos (quadro comparativo de conexos). Não usa o token do Apoia. |
 | | Documentos da Minha Biblioteca | Conteúdo de minutas/teses/modelos salvos na Biblioteca. |
 | **Jurisprudência** | Pangea (STF/STJ) | Teses, súmulas, OJs, temas de repercussão geral e repetitivos. |
 | | Busca Semântica / Híbrida | Busca vetorial/híbrida em temas de RG do STF e repetitivos do STJ. |
+| | Inteiro Teor de Precedentes | Texto completo de até 10 documentos pelos IDs da busca de Precedentes (também pelo botão **Inteiro teor** em cada resultado). |
 | | Leading Case (Paradigma) | Temas pelo número do processo paradigma. |
 | | Precedentes Jurisprudenciais | Busca de precedentes com operadores lógicos. |
 | **Prazos & Datas** | Data Atual Oficial | Data de hoje (DD/MM/YYYY). |
@@ -59,6 +61,8 @@ Arquivo principal: [`apoia-mcp-assistant.user.js`](apoia-mcp-assistant.user.js)
 
 ## 🗒️ Histórico de versões
 
+- **1.7.0** — Suporte à tool **`precedentFullText`** (*Inteiro Teor de Precedentes*): nome amigável, ajuda dos campos, IDs aceitos separados por vírgula/espaço e exibição por documento (processo, classe, UF, *Ler íntegra* / *Copiar íntegra*, Markdown). Cada resultado de *Precedentes Jurisprudenciais* ganha o botão **Inteiro teor**, que abre o texto no visualizador. Os resultados de Precedentes passam a exibir ementa/trecho e tipo do documento. O erro «não configurada para o seu tribunal (JURISPRUDENCIA_URL)» vira aviso claro de que a base de jurisprudência não está habilitada no Apoia para o tribunal do usuário. Correção: após um erro, as abas JSON/Markdown não mostram mais o resultado da consulta anterior.
+- **1.6.0** — Nova ferramenta local **Decisões (Julia TRF5)**: consulta direta à API pública da Julia (`juliapesquisa.trf5.jus.br/julia-pesquisa/api/v1/processo/{numero}`), sem passar pelo Apoia — continua disponível com o token expirado. Aceita vários números CNJ (ou um texto colado, de onde os números são extraídos) e, com 2+ processos, abre um **quadro comparativo** para conexos. Cada decisão aparece em ordem cronológica com instância, órgão julgador, magistrado(a), **resultado** (procedente, provido, não conhecido…) e votação extraídos por heurística do **dispositivo** destacado, além de *Ler íntegra* / *Copiar íntegra*. Remove as duplicatas que a Julia devolve e restos de HTML do texto.
 - **1.5.4** — Modo expandido ocupa o painel inteiro: oculta também a barra de token e as abas de categoria, reduz margens e remove a rolagem interna da linha do tempo (fica uma única rolagem). Ao expandir, as movimentações passam a exibir todas automaticamente (e voltam às 8 recentes ao recolher). O filtro de movimentações agora mostra todas as correspondências, não só as 8 primeiras; o botão já exibe a contagem e some quando há 8 ou menos.
 - **1.5.3** — Token expirado (HTTP 401) agora abre automaticamente o painel de Configurações com o cursor no campo de token, tanto na carga inicial quanto ao executar uma ferramenta. O modo expandido de resultados passa a ocultar também os painéis de Configurações e Histórico; abrir qualquer um deles recolhe o modo expandido.
 - **1.5.2** — Correção definitiva do «expected array, received string» (MCP error -32602): em páginas com Prototype.js antigo (ex.: PJe), `Array.prototype.toJSON` fazia o `JSON.stringify` do payload JSON-RPC serializar arrays como *string* — a 1.4.1 corrigia o chamador, mas a corrupção acontecia depois, na serialização. O payload agora usa `safeJsonStringify` (arrays/objetos montados à mão).

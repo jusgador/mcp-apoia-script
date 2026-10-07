@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.5.4
-// @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Documentos da Biblioteca, Jurisprudência Pangea, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
+// @version      1.7.0
+// @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -15,6 +15,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @connect      apoia.pdpj.jus.br
+// @connect      juliapesquisa.trf5.jus.br
 // @connect      *
 // @run-at       document-end
 // ==/UserScript==
@@ -87,6 +88,14 @@
       displayName: 'Texto de Peças Processuais',
       defaultArgs: {}
     },
+    juliaDecisions: {
+      category: 'processos',
+      displayName: 'Decisões (Julia TRF5)',
+      helpNotice: 'Consulta direta à Julia (TRF5), sem passar pelo Apoia — funciona mesmo com o token expirado. Cobre sentenças, acórdãos de TR/TRU e ementas do TRF5 indexados (apenas PJe). O resultado e o resumo do dispositivo são extraídos por heurística: confira na íntegra.',
+      helpUrl: 'https://juliapesquisa.trf5.jus.br/julia-pesquisa/',
+      helpUrlLabel: 'Abrir Julia | Pesquisa Inteligente',
+      defaultArgs: {}
+    },
     libraryDocument: {
       category: 'processos',
       displayName: 'Documentos da Minha Biblioteca',
@@ -107,6 +116,12 @@
       category: 'jurisprudencia',
       displayName: 'Precedentes Jurisprudenciais',
       defaultArgs: { page: 1 }
+    },
+    precedentFullText: {
+      category: 'jurisprudencia',
+      displayName: 'Inteiro Teor de Precedentes',
+      helpNotice: 'Use os IDs retornados por "Precedentes Jurisprudenciais" — ou, mais simples, o botão "Inteiro teor" em cada resultado daquela ferramenta. Até 10 IDs por consulta.',
+      defaultArgs: {}
     },
     leadingCaseSearch: {
       category: 'jurisprudencia',
@@ -149,8 +164,220 @@
     includeOthers: 'Amplia a busca para órgãos além dos filtrados.',
     stripHtml: 'Remove marcações HTML do texto da tese.',
     searchQuery: 'Operadores: e, ou, não, aspas para expressão exata.',
-    defaultVariables: 'Variáveis aplicadas a todos os cálculos do lote.'
+    defaultVariables: 'Variáveis aplicadas a todos os cálculos do lote.',
+    processNumbers: 'Um ou mais números CNJ, com ou sem máscara. Pode colar um texto: os números são extraídos dele.',
+    idArray: 'IDs (campo "id") dos resultados de Precedentes Jurisprudenciais, separados por vírgula. Até 10.',
+    limiteCaracteres: 'Corta o texto de cada documento neste tamanho (padrão 50000).'
   };
+
+  // ==========================================
+  // JULIA (TRF5) — FERRAMENTA LOCAL, SEM MCP
+  // ==========================================
+  // API pública usada pela própria página da Julia (juliapesquisa.trf5.jus.br),
+  // sem autenticação. GET /processo/{numero} devolve {status, mensagem, resultado[]}
+  // com as decisões indexadas daquele número em todas as instâncias (JEF, TR,
+  // TRU, varas, TRF5). Observado em out/2026: cada documento vem duplicado
+  // (mesmo codigoDocumento) e só texto/metadados básicos vêm preenchidos.
+  const JULIA_API_BASE = 'https://juliapesquisa.trf5.jus.br/julia-pesquisa/api/v1/processo/';
+  const JULIA_MAX_PROCESSOS = 20;
+
+  const LOCAL_TOOLS = [{
+    name: 'juliaDecisions',
+    local: true,
+    description: 'Sentenças, acórdãos e ementas indexados na Julia (TRF5) para um ou mais processos, em ordem cronológica, com resultado e dispositivo destacados. Útil para comparar processos conexos.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        processNumbers: {
+          type: 'string',
+          maxLength: 5000,
+          description: 'Ex.: 0003014-69.2019.4.05.8109, 0800006-17.2011.4.05.8308'
+        }
+      },
+      required: ['processNumbers']
+    }
+  }];
+
+  const TIPO_DOC_JULIA = { SENTENCA: 'Sentença', ACORDAO: 'Acórdão', EMENTA: 'Ementa' };
+
+  // Extrai números CNJ (com ou sem máscara) de um texto livre, sem repetições.
+  function extrairNumerosCnj(texto) {
+    const re = /\b\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}\b/g;
+    const vistos = new Set();
+    for (const m of String(texto || '').match(re) || []) vistos.add(m.replace(/\D/g, ''));
+    return [...vistos];
+  }
+
+  function formatarCnj(digitos) {
+    const d = String(digitos || '').replace(/\D/g, '');
+    if (d.length !== 20) return digitos;
+    return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16)}`;
+  }
+
+  function formatarDataIso(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+  }
+
+  // O texto chega com quebras e espaços soltos e, às vezes, restos de HTML do
+  // Word (<!--[endif]-->). Mesmo critério de parágrafo da página da Julia.
+  function normalizarTextoJulia(texto) {
+    return String(texto || '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<!\[[\s\S]*?\]>/g, '')
+      .replace(/<\/?[a-z][^>]*>/gi, '')
+      .replace(/\s*[\r\n]+\s*/g, '\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+  }
+
+  // Trecho do dispositivo por heurística, conforme o tipo de documento.
+  function extrairDispositivo(tipo, texto) {
+    if (!texto) return '';
+    const corta = (s, n) => (s.length > n ? s.slice(0, n).replace(/\s+\S*$/, '') + ' […]' : s);
+
+    if (tipo === 'ACORDAO') {
+      const ocorrencias = [...texto.matchAll(/(?:^|\n)[^\n]*\bacorda[m]?\b[^\n]*/gi)];
+      if (ocorrencias.length) return corta(ocorrencias[ocorrencias.length - 1][0].trim(), 700);
+    }
+
+    if (tipo === 'EMENTA') {
+      // Formato CNJ novo: linha só com "IV. Dispositivo (e tese)" — não casa com
+      // "Dispositivos relevantes citados" —, sem as listas de citações.
+      const secao = /(?:^|\n)\s*(?:[IVX]+\s*[.\-–]\s*)?DISPOSITIVO(?: E TESE)?\s*:?\s*\n([\s\S]*)/i.exec(texto);
+      if (secao) {
+        const corpo = secao[1].split(/\n\s*(?:Dispositivos? relevantes? citados?|Jurisprud[êe]ncia relevante citada)/i)[0];
+        return corta(corpo.trim(), 700);
+      }
+      // Cabeçalho da ementa em caixa alta: "... APELAÇÃO PROVIDA."
+      const cab = /[^.\n]*\b(?:PROVID[OA]S?|IMPROVID[OA]S?|DESPROVID[OA]S?|N[ÃA]O\s+CONHECID[OA]S?|PREJUDICAD[OA]S?)\b[^.\n]*\.?/.exec(texto);
+      if (cab) return corta(cab[0].trim(), 500);
+    }
+
+    // Sentença (e fallback): último marcador clássico de dispositivo. A palavra
+    // "dispositivo" só vale como título de seção ("III – Dispositivo."), não no
+    // meio da fundamentação ("O dispositivo estabelece...").
+    const marcadores = /(?:^|\n)[^\n]*?\b(?:ante o exposto|diante do exposto|pelo exposto|isto posto|isso posto|posto isso|em face do exposto|em face do quanto exposto|por todo o exposto|por tais raz[õo]es|ante o expendido)\b|(?:^|\n)\s*(?:[IVX]+\s*[.\-–]\s*)?dispositivo\s*[.:]?\s*(?=\n)/gi;
+    const achados = [...texto.matchAll(marcadores)];
+    if (achados.length) {
+      const ini = achados[achados.length - 1].index;
+      return corta(texto.slice(ini).trim(), 1200);
+    }
+    return '';
+  }
+
+  // Classifica o resultado a partir do dispositivo (ou do texto). A ordem
+  // importa: "improcedente" antes de "procedente", "improvido" antes de "provido".
+  // Em acórdão/ementa vale o resultado do recurso ("apelação provida para
+  // extinguir o processo" é PROVIDO); em sentença, o do pedido.
+  const REGRAS_PEDIDO = [
+    [/parcialmente procedente|procedente em parte|parcial proced[êe]ncia/, 'PARCIALMENTE PROCEDENTE'],
+    [/improcedente|improced[êe]ncia/, 'IMPROCEDENTE'],
+    [/\bprocedente|\bproced[êe]ncia/, 'PROCEDENTE'],
+    [/sem (?:resolu[çc][ãa]o|julgamento) (?:do|de) m[ée]rito|extin[çc][ãa]o do processo|extingo o processo/, 'EXTINTO SEM MÉRITO'],
+    [/homolog/, 'HOMOLOGAÇÃO']
+  ];
+  const REGRAS_RECURSO = [
+    [/parcial provimento|parcialmente provid|provid[oa]s? em parte/, 'PARCIALMENTE PROVIDO'],
+    [/\bneg(?:ar|o|ou|aram|a)(?:-se|-lhes?)? provimento|improvid|desprovid|n[ãa]o provid/, 'NÃO PROVIDO'],
+    [/\bd(?:ar|ou|eu|eram|á)(?:-se|-lhes?)? provimento|\bprovid[oa]s?\b/, 'PROVIDO'],
+    [/n[ãa]o conhe[çc]/, 'NÃO CONHECIDO'],
+    [/prejudicad/, 'PREJUDICADO'],
+    [/\brejeit(?:o|ar|ados?|adas?)\b/, 'REJEITADO'],
+    [/\bacolh(?:o|er|idos?|idas?)\b/, 'ACOLHIDO']
+  ];
+
+  function classificarResultado(trecho, tipo) {
+    const t = String(trecho || '').toLowerCase();
+    if (!t) return '';
+    const regras = tipo === 'SENTENCA' ? [...REGRAS_PEDIDO, ...REGRAS_RECURSO] : [...REGRAS_RECURSO, ...REGRAS_PEDIDO];
+    for (const [re, rotulo] of regras) if (re.test(t)) return rotulo;
+    return '';
+  }
+
+  function classificarVotacao(trecho) {
+    const t = String(trecho || '').toLowerCase();
+    if (/por unanimidade|un[âa]nime/.test(t)) return 'unanimidade';
+    if (/por maioria/.test(t)) return 'maioria';
+    return '';
+  }
+
+  function juliaGetJson(url) {
+    return new Promise((resolve, reject) => {
+      const tratar = (status, texto) => {
+        if (status < 200 || status >= 300) return reject({ status, message: `Julia respondeu HTTP ${status}` });
+        try { resolve(JSON.parse(texto)); } catch (e) { reject({ message: 'Resposta inválida da Julia' }); }
+      };
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: { 'Accept': 'application/json' },
+          timeout: 30000,
+          onload: (res) => tratar(res.status, res.responseText),
+          onerror: () => reject({ message: 'fetch failed: não foi possível conectar à Julia (TRF5)' }),
+          ontimeout: () => reject({ message: 'Tempo limite excedido ao consultar a Julia (TRF5).' })
+        });
+        return;
+      }
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(async (r) => tratar(r.status, await r.text()))
+        .catch(() => reject({ message: 'fetch failed: não foi possível conectar à Julia (TRF5)' }));
+    });
+  }
+
+  async function consultarJulia(numero) {
+    const json = await juliaGetJson(JULIA_API_BASE + numero);
+    const unicos = new Map();
+    for (const d of json.resultado || []) {
+      if (!unicos.has(d.codigoDocumento)) unicos.set(d.codigoDocumento, d);
+    }
+    return [...unicos.values()]
+      .map(d => {
+        const texto = normalizarTextoJulia(d.texto || d.ementa);
+        const dispositivo = extrairDispositivo(d.tipoDocumento, texto);
+        return {
+          codigoDocumento: d.codigoDocumento,
+          tipoDocumento: d.tipoDocumento,
+          tipoLabel: TIPO_DOC_JULIA[d.tipoDocumento] || d.tipoDocumento || 'Documento',
+          instancia: d.instancia,
+          orgao: d.orgao,
+          sistema: d.sistema,
+          orgaoJulgador: d.orgaoJulgador,
+          classeJudicial: d.classeJudicial,
+          relator: d.relator,
+          relatorAcordao: d.relatorAcordao,
+          dataJulgamento: d.dataJulgamento,
+          dataAssinatura: d.dataAssinatura,
+          resultado: classificarResultado(dispositivo || texto.slice(0, 600), d.tipoDocumento),
+          votacao: d.tipoDocumento === 'SENTENCA' ? '' : classificarVotacao(dispositivo || texto),
+          dispositivo,
+          texto,
+          citacao: d.resumo || ''
+        };
+      })
+      .sort((a, b) => String(a.dataJulgamento || '').localeCompare(String(b.dataJulgamento || '')));
+  }
+
+  async function executarJuliaDecisions(args) {
+    const numeros = extrairNumerosCnj(args.processNumbers);
+    if (numeros.length === 0) {
+      throw { message: 'Nenhum número de processo CNJ válido encontrado no texto informado.' };
+    }
+    const alvo = numeros.slice(0, JULIA_MAX_PROCESSOS);
+    const processos = await Promise.all(alvo.map(async (n) => {
+      try {
+        return { numeroProcesso: formatarCnj(n), documentos: await consultarJulia(n) };
+      } catch (err) {
+        return { numeroProcesso: formatarCnj(n), documentos: [], erro: err.message || 'Falha na consulta' };
+      }
+    }));
+    if (processos.every(p => p.erro)) throw { message: processos[0].erro };
+    return {
+      processos,
+      ignorados: numeros.length - alvo.length
+    };
+  }
 
   // ==========================================
   // CLIENTE DE REDE MCP
@@ -257,6 +484,11 @@
         } else if (!args.documentIdArray) {
           args.documentIdArray = [];
         }
+      }
+
+      if (name === 'precedentFullText') {
+        const ids = Array.isArray(args.idArray) ? args.idArray : [args.idArray];
+        args.idArray = ids.flatMap(v => String(v ?? '').split(/[\s,;]+/)).filter(Boolean);
       }
 
       if (args.orgaos && typeof args.orgaos === 'string') {
@@ -1307,6 +1539,41 @@
       color: var(--badge-status-text);
     }
 
+    /* Decisões (Julia TRF5) */
+    .julia-dec {
+      border-left: 3px solid var(--border-color);
+      padding: 6px 0 6px 10px;
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .julia-dec-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); }
+    .julia-dec-sub { font-size: 11px; color: var(--text-muted); }
+    .julia-res {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid currentColor;
+    }
+    .julia-res.pos { color: var(--text-prazo-val); }
+    .julia-res.neg { color: var(--danger-text); }
+    .julia-res.neu { color: var(--text-muted); }
+    .julia-disp {
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: var(--text-main);
+      background: var(--bg-viewer);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 6px 8px;
+      white-space: pre-wrap;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+    .julia-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
     .juris-tese {
       font-size: 12px;
       color: var(--text-main);
@@ -1964,11 +2231,14 @@
     async loadTools() {
       try {
         const rawTools = await this.client.listTools();
-        this.tools = rawTools;
+        this.tools = [...LOCAL_TOOLS, ...rawTools];
         this.renderToolsGrid();
         this.updateTokenStatus(true);
       } catch (err) {
         console.warn('[Apoia MCP] Erro ao carregar ferramentas:', err);
+        // As ferramentas locais (Julia) não dependem do token do Apoia.
+        this.tools = [...LOCAL_TOOLS];
+        this.renderToolsGrid();
         this.updateTokenStatus(false, err.message || 'Token expirado ou inválido.');
         if (err.isAuthError) this.openSettingsPanel({ focusToken: true });
       }
@@ -2064,8 +2334,8 @@
           <div class="info-notice">
             <div>${meta.helpNotice}</div>
             <div>
-              <a href="${LIBRARY_PORTAL_URL}" target="_blank" rel="noopener noreferrer" style="color: var(--primary-accent); font-weight: 600; text-decoration: underline; display: inline-flex; align-items: center; gap: 4px;">
-                Acessar Portal Apoia PDPJ ${ICONS.externalLink}
+              <a href="${meta.helpUrl || LIBRARY_PORTAL_URL}" target="_blank" rel="noopener noreferrer" style="color: var(--primary-accent); font-weight: 600; text-decoration: underline; display: inline-flex; align-items: center; gap: 4px;">
+                ${meta.helpUrlLabel || 'Acessar Portal Apoia PDPJ'} ${ICONS.externalLink}
               </a>
             </div>
           </div>
@@ -2298,13 +2568,16 @@
       const resultsTime = this.shadow.getElementById('resultsTime');
 
       resultsBox.style.display = 'flex';
-      resultsContent.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--text-muted);"><div class="loader"></div> Processando requisição no Apoia MCP...</div>`;
+      const fonte = this.selectedTool.local ? 'Consultando a Julia (TRF5)...' : 'Processando requisição no Apoia MCP...';
+      resultsContent.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--text-muted);"><div class="loader"></div> ${fonte}</div>`;
 
       resultsBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
       try {
         const args = this.getFormValues();
-        const res = await this.client.callTool(this.selectedTool.name, args);
+        const res = this.selectedTool.local
+          ? await this.runLocalTool(this.selectedTool.name, args)
+          : await this.client.callTool(this.selectedTool.name, args);
         this.lastResult = res;
 
         resultsTime.textContent = `${res.durationMs}ms`;
@@ -2314,6 +2587,8 @@
       } catch (err) {
         console.error('[Apoia MCP] Falha na execução:', err);
         resultsTime.textContent = 'Erro';
+        // Sem isso, as abas JSON/Markdown voltariam a exibir o resultado anterior.
+        this.lastResult = null;
 
         if (err.isAuthError) {
           this.updateTokenStatus(false, 'Token expirado ou inválido (401)');
@@ -2326,7 +2601,9 @@
           `;
           this.openSettingsPanel({ focusToken: true });
         } else {
-          const info = this.interpretServiceError(err.message || 'Falha ao executar ferramenta no servidor Apoia');
+          const info = this.selectedTool?.local
+            ? { title: 'Falha ao consultar a Julia (TRF5)', body: err.message || 'Erro desconhecido' }
+            : this.interpretServiceError(err.message || 'Falha ao executar ferramenta no servidor Apoia');
           resultsContent.innerHTML = `
             <div class="error-card">
               <div class="error-card-title">${ICONS.alert} ${this.escapeHtml(info.title)}</div>
@@ -2345,6 +2622,12 @@
     // Traduz erros técnicos repassados pelo Apoia em mensagens amigáveis.
     interpretServiceError(raw) {
       const t = String(raw || '');
+      if (/JURISPRUDENCIA_URL|n[ãa]o configurada para o seu tribunal/i.test(t)) {
+        return {
+          title: 'Indisponível para o seu tribunal',
+          body: 'O Apoia ainda não tem base de jurisprudência configurada para o seu tribunal (JURISPRUDENCIA_URL), por isso Precedentes Jurisprudenciais e Inteiro Teor não funcionam na sua conta. Não é problema de token nem da sua consulta — depende da configuração do Apoia. Para decisões do TRF5, use "Decisões (Julia TRF5)".'
+        };
+      }
       if (/fetch failed|failed to search|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|502|503|504/i.test(t)) {
         return {
           title: 'Serviço indisponível no momento',
@@ -2390,12 +2673,16 @@
       body.innerHTML = '';
       if (toolName === 'processMetadata') {
         this.renderProcessMetadata(body, data);
+      } else if (toolName === 'juliaDecisions') {
+        this.renderJuliaDecisions(body, data);
+      } else if (toolName === 'precedentFullText') {
+        this.renderPrecedentFullText(body, data);
       } else if (toolName === 'piecesText') {
         this.renderPiecesText(body, data);
       } else if (toolName === 'libraryDocument') {
         this.renderLibraryDocument(body, data);
       } else if (toolName === 'pangea' || toolName === 'semanticSearch' || toolName === 'precedent' || toolName === 'leadingCaseSearch') {
-        this.renderJurisprudenceCards(body, data);
+        this.renderJurisprudenceCards(body, data, toolName);
       } else if (toolName === 'dateDiff' || toolName === 'addDate' || toolName === 'currentDate') {
         this.renderDateResult(body, toolName, data);
       } else if (toolName === 'calculator') {
@@ -2590,6 +2877,229 @@
       });
     }
 
+    // Ferramentas locais (sem MCP): devolvem o mesmo formato de callTool.
+    async runLocalTool(name, args) {
+      const inicio = performance.now();
+      let data;
+      if (name === 'juliaDecisions') data = await executarJuliaDecisions(args);
+      else throw { message: `Ferramenta local desconhecida: ${name}` };
+      return {
+        raw: null,
+        data,
+        text: this.convertToMarkdown(name, data),
+        durationMs: Math.round(performance.now() - inicio)
+      };
+    }
+
+    juliaResultadoClasse(resultado) {
+      if (/^(PROCEDENTE|PROVIDO|PARCIALMENTE)/.test(resultado)) return 'pos';
+      if (/^(IMPROCEDENTE|NÃO PROVIDO|NÃO CONHECIDO|EXTINTO)/.test(resultado)) return 'neg';
+      return 'neu';
+    }
+
+    renderJuliaDecisions(container, data) {
+      const processos = data?.processos || [];
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+
+      // Quadro comparativo quando há mais de um processo (análise de conexos).
+      if (processos.length > 1) {
+        const linhas = processos.flatMap(p => (p.documentos.length ? p.documentos : [null]).map(d => `
+          <tr>
+            <td style="font-family: var(--font-mono); white-space: nowrap;">${esc(p.numeroProcesso)}</td>
+            <td>${d ? esc(d.tipoLabel) + ' · ' + esc(d.instancia) : (p.erro ? `<span style="color: var(--danger);">Erro</span>` : '<span style="color: var(--text-dim);">Nada indexado</span>')}</td>
+            <td style="white-space: nowrap;">${d ? esc(formatarDataIso(d.dataJulgamento)) : ''}</td>
+            <td>${d?.resultado ? `<span class="julia-res ${this.juliaResultadoClasse(d.resultado)}">${esc(d.resultado)}</span>` : ''}</td>
+          </tr>`)).join('');
+        const quadro = document.createElement('div');
+        quadro.className = 'proc-card';
+        quadro.innerHTML = `
+          <div class="proc-header">
+            <div style="font-size: 13px; font-weight: 700; color: var(--primary-accent);">Quadro comparativo</div>
+            <span class="badge-court">${processos.length} PROCESSOS</span>
+          </div>
+          <table class="data-table">
+            <thead><tr><th>Processo</th><th>Decisão</th><th>Julgamento</th><th>Resultado</th></tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>
+          ${data.ignorados ? `<div class="julia-dec-sub">${data.ignorados} número(s) além do limite de ${JULIA_MAX_PROCESSOS} não foram consultados.</div>` : ''}
+        `;
+        container.appendChild(quadro);
+      }
+
+      processos.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'proc-card';
+        const instancias = [...new Set(p.documentos.map(d => d.instancia).filter(Boolean))].join(' → ');
+        card.innerHTML = `
+          <div class="proc-header">
+            <div>
+              <div class="proc-num">${esc(p.numeroProcesso)}</div>
+              <div style="font-size: 11px; color: var(--text-muted);">${p.documentos.length} decisão(ões) indexada(s)${instancias ? ' · ' + esc(instancias) : ''}</div>
+            </div>
+            <span class="badge-court">JULIA</span>
+          </div>
+        `;
+
+        if (p.erro) {
+          card.insertAdjacentHTML('beforeend', `<div class="error-card"><div class="error-card-body">${esc(p.erro)}</div></div>`);
+        } else if (p.documentos.length === 0) {
+          card.insertAdjacentHTML('beforeend', `<div class="julia-dec-sub" style="padding: 6px 0;">Nenhuma decisão indexada na Julia para este número (a Julia cobre só documentos do PJe da 5ª Região).</div>`);
+        }
+
+        p.documentos.forEach(d => {
+          const el = document.createElement('div');
+          el.className = 'julia-dec';
+          const magistrado = d.relatorAcordao ? `${d.relator} · Rel. p/ acórdão: ${d.relatorAcordao}` : d.relator;
+          el.innerHTML = `
+            <div class="julia-dec-head">
+              <span class="badge-type">${esc(d.tipoLabel)}</span>
+              <span class="badge-court">${esc(d.orgao)} · ${esc(d.instancia)}</span>
+              ${d.resultado ? `<span class="julia-res ${this.juliaResultadoClasse(d.resultado)}">${esc(d.resultado)}</span>` : ''}
+              ${d.votacao ? `<span class="badge-status">${esc(d.votacao)}</span>` : ''}
+              <span>${esc(formatarDataIso(d.dataJulgamento))}</span>
+            </div>
+            <div class="julia-dec-sub">${esc(d.orgaoJulgador)} · ${esc(d.classeJudicial)}${magistrado ? ' · ' + esc(magistrado) : ''}</div>
+            ${d.dispositivo ? `<div class="julia-disp">${esc(d.dispositivo)}</div>` : '<div class="julia-dec-sub" style="font-style: italic;">Dispositivo não localizado automaticamente — veja a íntegra.</div>'}
+            <div class="julia-actions">
+              <button class="doc-btn-view" data-acao="ler">${ICONS.file} Ler íntegra</button>
+              <button class="doc-btn-view" data-acao="copiar">${ICONS.copy} Copiar íntegra</button>
+            </div>
+          `;
+          el.querySelector('[data-acao="ler"]').addEventListener('click', () => {
+            this.openTextViewer(`${d.tipoLabel} — ${d.orgaoJulgador || ''}`, `Processo ${p.numeroProcesso} · ${formatarDataIso(d.dataJulgamento)} · Julia TRF5`, d.texto + (d.citacao ? `\n\n${d.citacao}` : ''));
+          });
+          el.querySelector('[data-acao="copiar"]').addEventListener('click', () => {
+            GM_setClipboard(d.texto);
+            this.showToast('Íntegra copiada para a área de transferência.');
+          });
+          card.appendChild(el);
+        });
+
+        container.appendChild(card);
+      });
+    }
+
+    juliaToMarkdown(data) {
+      const processos = data?.processos || [];
+      return processos.map(p => {
+        let out = `## Processo ${p.numeroProcesso}\n`;
+        if (p.erro) return out + `\n_Erro na consulta: ${p.erro}_\n`;
+        if (!p.documentos.length) return out + `\n_Nenhuma decisão indexada na Julia._\n`;
+        p.documentos.forEach(d => {
+          out += `\n### ${d.tipoLabel} — ${d.orgaoJulgador || ''} (${formatarDataIso(d.dataJulgamento)})\n`;
+          out += `- **Classe:** ${d.classeJudicial || ''}\n`;
+          if (d.relator) out += `- **Magistrado(a)/Relator(a):** ${d.relator}\n`;
+          if (d.resultado) out += `- **Resultado (heurístico):** ${d.resultado}${d.votacao ? `, por ${d.votacao}` : ''}\n`;
+          if (d.dispositivo) out += `\n> ${d.dispositivo.replace(/\n/g, '\n> ')}\n`;
+        });
+        return out;
+      }).join('\n---\n\n');
+    }
+
+    // precedentFullText: o formato exato não está no código público do Apoia;
+    // a descrição da tool garante número, classe, UF e texto por item. Aceita
+    // variações de nome de campo e resposta em texto puro.
+    normalizePrecedentFullText(data) {
+      if (data == null) return [];
+      if (typeof data === 'string') return [{ texto: data }];
+      const lista = Array.isArray(data)
+        ? data
+        : (data.resultados || data.documentos || data.results || data.items || data.precedentes || [data]);
+      const txt = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+      return lista.map(it => {
+        if (typeof it === 'string') return { texto: it };
+        const proc = typeof it.processo === 'object' && it.processo ? it.processo : {};
+        return {
+          id: it.id ?? it.idDocumento ?? '',
+          numero: it.numeroProcesso || it.numero_processo || proc.numero || proc.numeroProcesso || (typeof it.processo === 'string' ? it.processo : '') || it.numero || '',
+          classe: it.classe?.descricao || (typeof it.classe === 'string' ? it.classe : '') || it.siglaClasse || proc.classe || '',
+          uf: it.uf || proc.uf || '',
+          tipo: it.tipoDocumento || it.tipo || '',
+          orgao: it.orgaoJulgador || it.orgao || '',
+          relator: it.relator || '',
+          data: it.dataJulgamento || it.dataPublicacao || '',
+          texto: txt(it.texto ?? it.inteiroTeor ?? it.textoCompleto ?? it.conteudo ?? it.content ?? it.text ?? it.ementa),
+          erro: it.erro || it.error || ''
+        };
+      });
+    }
+
+    renderPrecedentFullText(container, data) {
+      const docs = this.normalizePrecedentFullText(data);
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+      if (docs.length === 0) {
+        container.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 16px;">Nenhum documento retornado.</div>`;
+        return;
+      }
+      docs.forEach(d => {
+        const card = document.createElement('div');
+        card.className = 'proc-card';
+        const titulo = d.numero ? `Processo ${d.numero}` : `Documento ${d.id || ''}`;
+        const meta = [d.orgao, d.relator, d.data].filter(Boolean).join(' · ');
+        card.innerHTML = `
+          <div class="proc-header">
+            <div>
+              <div class="proc-num">${esc(titulo)}</div>
+              ${meta ? `<div style="font-size: 11px; color: var(--text-muted);">${esc(meta)}</div>` : ''}
+            </div>
+            <div class="juris-meta">
+              ${d.classe ? `<span class="badge-type">${esc(d.classe)}</span>` : ''}
+              ${d.uf ? `<span class="badge-court">${esc(d.uf)}</span>` : ''}
+              ${d.tipo ? `<span class="badge-status">${esc(d.tipo)}</span>` : ''}
+            </div>
+          </div>
+          ${d.erro
+            ? `<div class="error-card"><div class="error-card-body">${esc(d.erro)}</div></div>`
+            : `<div class="julia-disp" style="max-height: 260px;">${esc(d.texto.slice(0, 3000))}${d.texto.length > 3000 ? ' […]' : ''}</div>
+               <div class="julia-actions" style="margin-top: 6px;">
+                 <button class="doc-btn-view" data-acao="ler">${ICONS.file} Ler íntegra</button>
+                 <button class="doc-btn-view" data-acao="copiar">${ICONS.copy} Copiar íntegra</button>
+               </div>`}
+        `;
+        card.querySelector('[data-acao="ler"]')?.addEventListener('click', () => {
+          this.openTextViewer(titulo, [d.classe, d.uf, d.tipo, meta].filter(Boolean).join(' · ') || 'Inteiro teor', d.texto);
+        });
+        card.querySelector('[data-acao="copiar"]')?.addEventListener('click', () => {
+          GM_setClipboard(d.texto);
+          this.showToast('Inteiro teor copiado para a área de transferência.');
+        });
+        container.appendChild(card);
+      });
+    }
+
+    // Botão "Inteiro teor" nos resultados de Precedentes: busca e abre no visualizador.
+    async openPrecedentFullText(id, titulo) {
+      const body = this.shadow.getElementById('pieceViewerBody');
+      this.openTextViewer(titulo || 'Inteiro teor', `ID: ${id}`, '');
+      body.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; color: var(--text-muted);"><div class="loader"></div> Carregando inteiro teor pelo Apoia MCP...</div>`;
+      try {
+        const res = await this.client.callTool('precedentFullText', { idArray: [String(id)] });
+        const doc = this.normalizePrecedentFullText(res.data ?? res.text)[0];
+        if (!doc || doc.erro || !doc.texto) throw { message: doc?.erro || 'Documento sem texto retornado.' };
+        const sub = [doc.numero && `Processo ${doc.numero}`, doc.classe, doc.uf].filter(Boolean).join(' · ');
+        this.openTextViewer(titulo || 'Inteiro teor', sub || `ID: ${id}`, doc.texto);
+      } catch (err) {
+        this.currentLoadedPieceText = '';
+        const info = this.interpretServiceError(err.message || 'Falha ao obter o inteiro teor');
+        body.innerHTML = `
+          <div class="error-card">
+            <div class="error-card-title">${ICONS.alert} ${this.escapeHtml(info.title)}</div>
+            <div class="error-card-body">${this.escapeHtml(info.body)}</div>
+          </div>
+        `;
+        this.appendRetryButton(body, () => this.openPrecedentFullText(id, titulo));
+      }
+    }
+
+    // Visualizador de peças reaproveitado para textos já disponíveis localmente.
+    openTextViewer(titulo, subtitulo, texto) {
+      this.shadow.getElementById('pieceViewerTitle').textContent = titulo;
+      this.shadow.getElementById('pieceViewerSub').textContent = subtitulo;
+      this.shadow.getElementById('pieceViewerBody').textContent = texto || 'Sem texto.';
+      this.shadow.getElementById('pieceViewerOverlay').style.display = 'flex';
+      this.currentLoadedPieceText = texto || '';
+    }
+
     renderPiecesText(container, data) {
       const textContent = typeof data === 'string' ? data : (data.content || JSON.stringify(data, null, 2));
       container.innerHTML = `
@@ -2726,7 +3236,7 @@
       this.currentLoadedPieceText = '';
     }
 
-    renderJurisprudenceCards(container, data) {
+    renderJurisprudenceCards(container, data, toolName) {
       const results = data.results || (Array.isArray(data) ? data : []);
       const total = data.total || results.length;
 
@@ -2745,10 +3255,13 @@
         card.className = 'juris-card';
 
         const orgao = item.orgao || item.data?.orgao || '';
-        const especie = item.especie || item.data?.tipo || item.title || '';
-        const numero = item.numero || item.data?.nr || '';
+        const especie = item.especie || item.data?.tipo || item.title || item.tipoDocumento || '';
+        const numero = item.numero || item.data?.nr || item.numeroProcesso || '';
         const situacao = item.situacao || item.data?.situacao || '';
-        const tese = item.tese || item.teseSnippet || item.data?.tese || item.titulo || 'Sem texto de tese.';
+        // Precedentes Jurisprudenciais trazem "ementa" (acórdãos/súmulas) e o trecho em "texto",
+        // às vezes com marcação HTML de destaque: vira texto puro antes de escapar.
+        const textoPuro = (s) => this.escapeHtml(String(s).replace(/<[^>]+>/g, ''));
+        const tese = item.tese || item.teseSnippet || item.data?.tese || item.titulo || (item.ementa && textoPuro(item.ementa)) || (item.texto && textoPuro(item.texto)) || 'Sem texto de tese.';
         const questao = item.questao || item.data?.questao || '';
 
         let linksHtml = '';
@@ -2770,6 +3283,16 @@
           ${questao ? `<div class="juris-questao"><strong>Questão:</strong> ${questao}</div>` : ''}
           ${linksHtml ? `<div class="juris-links">${linksHtml}</div>` : ''}
         `;
+
+        if (toolName === 'precedent' && item.id != null && this.tools.some(t => t.name === 'precedentFullText')) {
+          const btn = document.createElement('button');
+          btn.className = 'doc-btn-view';
+          btn.style.alignSelf = 'flex-start';
+          btn.innerHTML = `${ICONS.file} Inteiro teor`;
+          const titulo = [especie, numero].filter(Boolean).join(' ') || 'Inteiro teor';
+          btn.addEventListener('click', () => this.openPrecedentFullText(item.id, titulo));
+          card.appendChild(btn);
+        }
 
         container.appendChild(card);
       });
@@ -2863,6 +3386,19 @@
           if (proc.partes?.poloAtivo) proc.partes.poloAtivo.forEach(p => out += `- **${p.tipo || 'AUTOR'}:** ${p.nome}\n`);
           if (proc.partes?.poloPassivo) proc.partes.poloPassivo.forEach(p => out += `- **${p.tipo || 'RÉU'}:** ${p.nome}\n`);
           return out;
+        }).join('\n---\n\n');
+      }
+
+      if (toolName === 'juliaDecisions') {
+        return this.juliaToMarkdown(data);
+      }
+
+      if (toolName === 'precedentFullText') {
+        return this.normalizePrecedentFullText(data).map(d => {
+          let out = `## ${d.numero ? 'Processo ' + d.numero : 'Documento ' + (d.id || '')}\n`;
+          const meta = [d.classe, d.uf, d.tipo, d.orgao, d.data].filter(Boolean).join(' · ');
+          if (meta) out += `_${meta}_\n`;
+          return out + (d.erro ? `\n_Erro: ${d.erro}_\n` : `\n${d.texto}\n`);
         }).join('\n---\n\n');
       }
 
