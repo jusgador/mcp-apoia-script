@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.9.0
+// @version      1.10.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -661,6 +661,121 @@ iniciar();
       colunas: BUSCA_COLUNAS_QLIK.map(c => c.titulo),
       linhas: r.linhas
     };
+  }
+
+  // ==========================================
+  // CONSULTA PÚBLICA DO PJe — PREENCHIMENTO AUTOMÁTICO
+  // ==========================================
+  // O item "Acompanhar" da busca unificada abre a consulta pública do sistema
+  // numa aba nova, com o número marcado no endereço (#apoia-consulta=...). Como
+  // o userscript também roda nas páginas do PJe, a instância que abre lá
+  // preenche o campo "Processo", dispara a pesquisa e abre o detalhe — o mesmo
+  // que se faria à mão. No TRF5 o reCAPTCHA está desativado no próprio site
+  // (a função executarReCaptcha tem "if (false)"), então o clique funciona
+  // por script. Só os sistemas PJe (pje1g, pje2g, pjett) têm esse formulário —
+  // Creta, Tebas e SEEU são outros sistemas e abrem pelo link comum.
+  const CONSULTA_MARCA_HASH = 'apoia-consulta=';
+  const CONSULTA_PJE_LISTA = /\/pjeconsulta\/ConsultaPublica\/listView\.seam/i;
+  const CONSULTA_PJE_DETALHE = '/pjeconsulta/ConsultaPublica/DetalheProcessoConsultaPublica/listView.seam?ca=';
+
+  function consultaPjeAutomatizavel(url) {
+    return CONSULTA_PJE_LISTA.test(String(url || ''));
+  }
+
+  function abrirAcompanhamentoPje(url, numero) {
+    const destino = String(url || '').split('#')[0] + '#' + CONSULTA_MARCA_HASH + encodeURIComponent(numero);
+    window.open(destino, '_blank', 'noopener');
+  }
+
+  // A página do PJe monta o formulário por JS: espera o elemento aparecer.
+  function esperarPor(obter, tempoMs) {
+    const inicio = Date.now();
+    return new Promise((resolve) => {
+      const passo = () => {
+        let valor = null;
+        try { valor = obter(); } catch (e) { valor = null; }
+        if (valor) return resolve(valor);
+        if (Date.now() - inicio > tempoMs) return resolve(null);
+        setTimeout(passo, 300);
+      };
+      passo();
+    });
+  }
+
+  // Aviso discreto no alto da página, para a automação não parecer travamento.
+  function avisoConsulta(texto) {
+    const el = document.createElement('div');
+    el.textContent = texto;
+    el.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:12px;transform:translateX(-50%);'
+      + 'background:#1e3a5f;color:#e2e8f0;padding:8px 14px;border-radius:6px;font:13px/1.4 sans-serif;'
+      + 'box-shadow:0 2px 10px rgba(0,0,0,.35);max-width:90vw;text-align:center;';
+    (document.body || document.documentElement).appendChild(el);
+    return {
+      atualizar: (t) => { el.textContent = t; },
+      remover: (t) => { if (t) { el.textContent = t; setTimeout(() => el.remove(), 5000); } else { el.remove(); } }
+    };
+  }
+
+  // Códigos "ca" dos resultados já renderizados (o detalhe só existe depois da pesquisa).
+  function codigosDetalhe() {
+    const vistos = new Set();
+    document.querySelectorAll('[onclick*="DetalheProcessoConsultaPublica"]').forEach((a) => {
+      const m = /ca=([0-9a-f]{16,})/i.exec(a.getAttribute('onclick') || '');
+      if (m) vistos.add(m[1]);
+    });
+    return [...vistos];
+  }
+
+  async function automatizarConsultaPje(numero) {
+    if (!CONSULTA_PJE_LISTA.test(location.pathname)) return;
+    const aviso = avisoConsulta(`Apoia MCP: preenchendo a busca do processo ${numero}…`);
+    try {
+      const campo = await esperarPor(
+        () => document.querySelector('input[id$="numProcesso-inputNumeroProcesso"]') || document.querySelector('input[name*="numProcesso"]'),
+        30000
+      );
+      const botao = await esperarPor(
+        () => document.getElementById('fPP:searchProcessos')
+          || [...document.querySelectorAll('input[type="button"], input[type="submit"], button')]
+            .find((e) => /pesquisar/i.test(e.value || e.textContent || '')),
+        30000
+      );
+      if (!campo || !botao) {
+        aviso.remover('Apoia MCP: não localizei o campo ou o botão de pesquisa nesta página.');
+        return;
+      }
+
+      campo.focus();
+      campo.value = numero;
+      campo.dispatchEvent(new Event('input', { bubbles: true }));
+      campo.dispatchEvent(new Event('change', { bubbles: true }));
+      aviso.atualizar('Apoia MCP: pesquisando o processo…');
+      botao.click();
+
+      const codigos = await esperarPor(() => { const l = codigosDetalhe(); return l.length ? l : null; }, 40000);
+      if (!codigos) {
+        aviso.remover('Apoia MCP: a pesquisa foi enviada, mas não voltou resultado. Confira o número.');
+        return;
+      }
+      if (codigos.length > 1) {
+        aviso.remover(`Apoia MCP: ${codigos.length} resultados nesta base — escolha um na lista.`);
+        return;
+      }
+      aviso.atualizar('Apoia MCP: abrindo o detalhe do processo…');
+      location.href = CONSULTA_PJE_DETALHE + codigos[0];
+    } catch (e) {
+      aviso.remover('Apoia MCP: não consegui automatizar a consulta nesta página.');
+    }
+  }
+
+  function iniciarAtalhoConsulta() {
+    if (window.top !== window) return;
+    if (!location.hash.includes(CONSULTA_MARCA_HASH)) return;
+    const numero = decodeURIComponent(location.hash.slice(location.hash.indexOf(CONSULTA_MARCA_HASH) + CONSULTA_MARCA_HASH.length)).trim();
+    if (!numero) return;
+    // Limpa a marca: um recarregamento manual volta à página normal.
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+    automatizarConsultaPje(numero);
   }
 
   // ==========================================
@@ -3293,11 +3408,18 @@ iniciar();
         return;
       }
 
+      const iNumero = colunas.indexOf('Número do Processo');
       const th = colunas.map(c => `<th>${esc(c)}</th>`).join('');
       const tb = linhas.map(r => `<tr>${r.map((v, i) => {
         const titulo = colunas[i];
-        if (titulo === 'Consulta' && /^https?:\/\//i.test(String(v || ''))) {
-          return `<td><a href="${esc(v)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(v)}). A página não aceita o número pela URL: a busca tem de ser feita lá." style="color: var(--primary-accent);">Abrir</a></td>`;
+        if (titulo === 'Consulta') {
+          const url = String(v || '');
+          if (!/^https?:\/\//i.test(url)) return `<td>${esc(url)}</td>`;
+          const numero = iNumero >= 0 ? String(r[iNumero] || '') : '';
+          if (numero && consultaPjeAutomatizavel(url)) {
+            return `<td style="white-space: nowrap;"><button class="doc-btn-view" data-apoia-acompanhar="1" data-url="${esc(url)}" data-num="${esc(numero)}" title="Abre a consulta pública do sistema numa aba nova, já com o número preenchido, pesquisa disparada e o detalhe do processo aberto.">${ICONS.search} Acompanhar</button></td>`;
+          }
+          return `<td><a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Este sistema não tem o formulário do PJe — a busca tem de ser feita lá." style="color: var(--primary-accent);">Abrir</a></td>`;
         }
         if (titulo === 'Número do Processo') {
           return `<td style="font-family: var(--font-mono); white-space: nowrap;">${esc(v)}</td>`;
@@ -3314,8 +3436,12 @@ iniciar();
           <table class="data-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>
         </div>
         ${data?.truncado ? `<div class="julia-dec-sub">Exibindo ${esc(String(linhas.length))} de ${esc(String(data.total))} registros — aumente o "limite" para ver mais.</div>` : ''}
-        <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). O "Abrir" leva à consulta pública do sistema (Creta, PJe, Tebas, SEEU…), que não recebe o número do processo pela URL.</div>
+        <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). Em "Acompanhar", o assistente abre a consulta pública do sistema (pje1g, pje2g ou pjett) numa aba nova, preenche o número, dispara a pesquisa e abre o detalhe do processo.</div>
       `;
+
+      card.querySelectorAll('[data-apoia-acompanhar]').forEach(btn => {
+        btn.addEventListener('click', () => abrirAcompanhamentoPje(btn.dataset.url, btn.dataset.num));
+      });
       container.appendChild(card);
     }
 
@@ -4062,6 +4188,10 @@ iniciar();
 
   const mcpClient = new McpClient();
   const mcpUI = new ApoiaMcpUI(mcpClient);
+
+  // Se esta aba foi aberta pelo botão "Acompanhar" da busca unificada, preenche
+  // a consulta pública do PJe, dispara a pesquisa e abre o detalhe do processo.
+  iniciarAtalhoConsulta();
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Abrir Assistente Apoia MCP (Alt + M)', () => {
