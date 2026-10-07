@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.7.0
-// @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
+// @version      1.8.0
+// @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
 // @downloadURL  https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -96,6 +96,14 @@
       helpUrlLabel: 'Abrir Julia | Pesquisa Inteligente',
       defaultArgs: {}
     },
+    buscaProcessualUnificada: {
+      category: 'processos',
+      displayName: 'Busca Processual Unificada',
+      helpNotice: 'Consulta o painel "Busca Processual Unificada" do TRF5 (Portal BI, carga diária) — 1º e 2º grau da 5ª Região, por nome, CPF/CNPJ, número ou classe. É a mesma base do painel, lida direto no assistente, sem abrir aba. O documento das partes aparece mascarado, como na tela. Buscas amplas (um prenome, uma classe inteira) podem demorar.',
+      helpUrl: 'https://transparencia.trf5.jus.br/single/?appid=7265b9ec-528e-4fe8-9291-42f8d1e93180',
+      helpUrlLabel: 'Abrir o painel do TRF5',
+      defaultArgs: { campo: 'Nome', limite: 100 }
+    },
     libraryDocument: {
       category: 'processos',
       displayName: 'Documentos da Minha Biblioteca',
@@ -166,6 +174,9 @@
     searchQuery: 'Operadores: e, ou, não, aspas para expressão exata.',
     defaultVariables: 'Variáveis aplicadas a todos os cálculos do lote.',
     processNumbers: 'Um ou mais números CNJ, com ou sem máscara. Pode colar um texto: os números são extraídos dele.',
+    campo: 'Onde procurar: Nome (parte ou advogado), CPF/CNPJ, Número do Processo ou Classe Judicial.',
+    termo: 'Nome, CPF/CNPJ, número CNJ ou classe. No nome valem aspas para expressão exata (ex.: "MARIA SILVA") e * como curinga.',
+    limite: 'Máximo de linhas na tabela (1 a 500).',
     idArray: 'IDs (campo "id") dos resultados de Precedentes Jurisprudenciais, separados por vírgula. Até 10.',
     limiteCaracteres: 'Corta o texto de cada documento neste tamanho (padrão 50000).'
   };
@@ -195,6 +206,32 @@
         }
       },
       required: ['processNumbers']
+    }
+  }, {
+    name: 'buscaProcessualUnificada',
+    local: true,
+    description: 'Localiza processos de 1º e 2º grau da 5ª Região por nome, CPF/CNPJ, número ou classe, no painel "Busca Processual Unificada" do TRF5 (Portal BI, carga diária).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        campo: {
+          type: 'string',
+          enum: ['Nome', 'CPF/CNPJ', 'Número do Processo', 'Classe Judicial'],
+          default: 'Nome'
+        },
+        termo: {
+          type: 'string',
+          maxLength: 200,
+          description: 'Nome completo, CPF/CNPJ, número CNJ (com ou sem máscara) ou classe. No nome, aspas fecham expressão exata.'
+        },
+        limite: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          default: 100
+        }
+      },
+      required: ['campo', 'termo']
     }
   }];
 
@@ -376,6 +413,221 @@
     return {
       processos,
       ignorados: numeros.length - alvo.length
+    };
+  }
+
+  // ==========================================
+  // BUSCA PROCESSUAL UNIFICADA (painel Qlik do TRF5)
+  // ==========================================
+  // O painel "Busca Processual Unificada" (transparencia.trf5.jus.br) é um app
+  // Qlik Sense alimentado pela carga diária do Portal BI; a tela procura por
+  // nome, CPF/CNPJ, número ou classe em 1º e 2º grau da 5ª Região. Não há API
+  // HTTP: a consulta é feita ao motor Qlik por WebSocket (protocolo JSON-RPC).
+  // O proxy do Qlik só aceita WebSocket de origens da própria instalação ou de
+  // origem opaca, então a consulta sai de um iframe `sandbox` (Origin: null)
+  // criado durante a execução e descartado em seguida — nada é conectado no
+  // carregamento da página.
+  const PAINEL_QLIK = {
+    host: 'transparencia.trf5.jus.br',
+    appId: '7265b9ec-528e-4fe8-9291-42f8d1e93180'
+  };
+
+  // Rótulo exibido no formulário -> campo real do modelo (conferido no app).
+  const BUSCA_CAMPOS_QLIK = {
+    'Nome': 'Parte Descrição',
+    'CPF/CNPJ': 'CPF/CNPJ',
+    'Número do Processo': 'Número Processo',
+    'Classe Judicial': 'Classe Judicial'
+  };
+
+  // Colunas da tabela, na mesma ordem do painel. "Parte Documento" é a versão
+  // mascarada do documento (o campo com o CPF/CNPJ completo é o "CPF/CNPJ",
+  // usado apenas para pesquisar, nunca para exibir).
+  const BUSCA_COLUNAS_QLIK = [
+    { campo: 'Parte Descrição', titulo: 'Nome' },
+    { campo: 'Parte Descrição Tipo', titulo: 'Sujeito Processual' },
+    { campo: 'Parte Documento', titulo: 'CPF/CNPJ' },
+    { campo: 'Número Processo', titulo: 'Número do Processo' },
+    { campo: 'Link', titulo: 'Consulta' },
+    { campo: 'Classe Judicial', titulo: 'Classe Judicial' },
+    { campo: 'Sistema', titulo: 'Sistema' },
+    { campo: '%SJ_PROCESSO_TRF', titulo: 'Seção' },
+    { campo: 'Grau', titulo: 'Grau' },
+    { campo: 'Instância', titulo: 'Instância' }
+  ];
+
+  const BUSCA_LIMITE_MAX = 500;
+  const BUSCA_TIMEOUT_MS = 90000;
+
+  // O motor faz busca textual (com curingas); CPF/CNPJ e número chegam em
+  // formatos diferentes dos digitados, então são normalizados antes.
+  function normalizarTermoQlik(campo, termo) {
+    const t = String(termo || '').trim();
+    if (campo === 'CPF/CNPJ') {
+      const digitos = t.replace(/\D/g, '');
+      // O campo guarda o documento sem máscara; o curinga cobre CPF (11) e
+      // CNPJ (14) e eventuais zeros à esquerda.
+      return digitos ? `*${digitos}*` : t;
+    }
+    if (campo === 'Número do Processo') {
+      const digitos = t.replace(/\D/g, '');
+      return digitos.length === 20 ? formatarCnj(digitos) : t;
+    }
+    return t;
+  }
+
+  // Script executado dentro do iframe de origem opaca. Fala o JSON-RPC do motor
+  // Qlik e devolve o resultado ao painel por postMessage. Sem GM_* aqui.
+  function htmlSandboxQlik(spec) {
+    const dados = JSON.stringify(spec).replace(/</g, '\\u003c');
+    const logica = `
+var SPEC = ${dados};
+post({ tipo: 'iniciando' });
+var ws = null, seq = 0, pend = {}, fim = false, relogio = null;
+function post(o) { o.__apoiaBusca = SPEC.token; parent.postMessage(o, '*'); }
+function encerrar(ok, dados) {
+  if (fim) { return; }
+  fim = true;
+  if (relogio) { clearTimeout(relogio); }
+  try { if (ws && ws.readyState === 1) { ws.close(); } } catch (e) {}
+  post({ tipo: ok ? 'resultado' : 'erro', dados: dados });
+}
+function falha(msg) { encerrar(false, msg); }
+function send(method, handle, params) {
+  var id = ++seq;
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id: id, method: method, handle: handle, params: params }));
+  return new Promise(function (res) { pend[id] = res; });
+}
+function consultar() {
+  return send('OpenDoc', -1, { qDocName: SPEC.appId, qUserName: null, qPassword: null, qSerial: null, qNoData: false }).then(function (od) {
+    if (od.error) { throw new Error(od.error.message || 'OpenDoc falhou'); }
+    var h = od.result.qReturn.qHandle;
+    return send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaLb' }, qListObjectDef: { qDef: { qFieldDefs: [SPEC.campo] }, qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: 1, qHeight: 1 }] } } }).then(function (lb) {
+      if (lb.error) { throw new Error(lb.error.message || 'Criação da busca falhou'); }
+      var lbH = lb.result.qReturn.qHandle;
+      return send('SearchListObjectFor', lbH, { qPath: '/qListObjectDef', qMatch: SPEC.termo }).then(function (sr) {
+        if (sr.error) { throw new Error(sr.error.message || 'Busca falhou'); }
+        return send('GetLayout', lbH, {}).then(function (lay) {
+          var lo = lay.result && lay.result.qLayout ? lay.result.qLayout.qListObject : null;
+          var casados = lo && lo.qSize ? lo.qSize.qcy : 0;
+          if (!casados) { return encerrar(true, { total: 0, casados: 0, linhas: [] }); }
+          return send('AcceptListObjectSearch', lbH, { qPath: '/qListObjectDef', qToggleMode: false, qSoftLock: false }).then(function (ac) {
+            if (ac.error) { throw new Error(ac.error.message || 'Seleção falhou'); }
+            var dims = SPEC.colunas.map(function (f) { return { qDef: { qFieldDefs: [f] } }; });
+            return send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaTab' }, qHyperCubeDef: { qDimensions: dims, qMeasures: [], qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: SPEC.colunas.length, qHeight: SPEC.limite }] } } }).then(function (cb) {
+              if (cb.error) { throw new Error(cb.error.message || 'Montagem da tabela falhou'); }
+              return send('GetLayout', cb.result.qReturn.qHandle, {}).then(function (gl) {
+                if (gl.error) { throw new Error(gl.error.message || 'Leitura da tabela falhou'); }
+                var hc = gl.result.qLayout.qHyperCube;
+                var pag = (hc.qDataPages && hc.qDataPages[0]) || null;
+                var linhas = ((pag && pag.qMatrix) || []).map(function (r) {
+                  return r.map(function (c) { return c ? c.qText : ''; });
+                });
+                encerrar(true, { total: hc.qSize.qcy, casados: casados, linhas: linhas });
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+}
+function iniciar() {
+  try { ws = new WebSocket('wss://' + SPEC.host + '/app/' + SPEC.appId); }
+  catch (e) { return falha('Não foi possível abrir a conexão com o painel do TRF5.'); }
+  relogio = setTimeout(function () { falha('Tempo limite excedido na consulta ao painel do TRF5.'); }, SPEC.tempoLimite);
+  ws.onerror = function () { falha('O painel do TRF5 recusou a conexão a partir desta página.'); };
+  ws.onmessage = function (ev) {
+    var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m && m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
+  };
+  ws.onopen = function () { consultar().catch(function (e) { falha((e && e.message) || 'Falha na consulta ao painel do TRF5.'); }); };
+}
+iniciar();
+`;
+    return '<!doctype html><meta charset="utf-8"><body><scr' + 'ipt>' + logica
+      + '<' + '/scr' + 'ipt></body>';
+  }
+
+  // Cria o iframe sob demanda, espera a resposta e o remove.
+  function consultarPainelQlik({ campo, termo, limite }) {
+    return new Promise((resolve, reject) => {
+      const spec = {
+        token: 'apoia-qlik-' + Date.now().toString(36) + Math.random().toString(36).slice(2),
+        host: PAINEL_QLIK.host,
+        appId: PAINEL_QLIK.appId,
+        campo,
+        termo,
+        colunas: BUSCA_COLUNAS_QLIK.map(c => c.campo),
+        limite,
+        tempoLimite: BUSCA_TIMEOUT_MS - 5000
+      };
+
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('sandbox', 'allow-scripts');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.tabIndex = -1;
+      iframe.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;border:0;visibility:hidden;';
+
+      let encerrado = false;
+      let iniciou = false;
+      let relogio;
+      let relogioInicio;
+
+      const limpar = () => {
+        clearTimeout(relogio);
+        clearTimeout(relogioInicio);
+        window.removeEventListener('message', aoReceber);
+        try { iframe.remove(); } catch (e) { /* ignore */ }
+      };
+      const abortar = (msg) => {
+        if (encerrado) return;
+        encerrado = true;
+        limpar();
+        reject({ message: msg });
+      };
+
+      const aoReceber = (ev) => {
+        if (ev.source !== iframe.contentWindow) return;
+        const d = ev.data;
+        if (!d || d.__apoiaBusca !== spec.token) return;
+        if (d.tipo === 'iniciando') { iniciou = true; clearTimeout(relogioInicio); return; }
+        if (encerrado) return;
+        encerrado = true;
+        limpar();
+        if (d.tipo === 'resultado') resolve(d.dados || { total: 0, casados: 0, linhas: [] });
+        else reject({ message: d.dados || 'Falha ao consultar o painel do TRF5.' });
+      };
+
+      relogio = setTimeout(() => abortar('Tempo limite excedido ao consultar o painel do TRF5. Buscas muito amplas (só o prenome, ou por classe inteira) demoram — refine o termo e tente de novo.'), BUSCA_TIMEOUT_MS);
+      // Se o iframe nem carregar (CSP da página bloqueando srcdoc), não faz
+      // sentido esperar o timeout cheio.
+      relogioInicio = setTimeout(() => { if (!iniciou) abortar('O painel do TRF5 não pôde ser iniciado nesta página (a política de segurança do site bloqueou o canal de consulta).'); }, 8000);
+
+      window.addEventListener('message', aoReceber);
+      iframe.srcdoc = htmlSandboxQlik(spec);
+      (document.body || document.documentElement).appendChild(iframe);
+    });
+  }
+
+  async function executarBuscaProcessualUnificada(args) {
+    const campo = BUSCA_CAMPOS_QLIK[args.campo] ? args.campo : 'Nome';
+    const digitado = String(args.termo || '').trim();
+    if (!digitado) throw { message: 'Informe o nome, CPF/CNPJ, número do processo ou classe a pesquisar.' };
+
+    const termo = normalizarTermoQlik(campo, digitado);
+    const limite = Math.min(Math.max(parseInt(args.limite, 10) || 100, 1), BUSCA_LIMITE_MAX);
+    const r = await consultarPainelQlik({ campo: BUSCA_CAMPOS_QLIK[campo], termo, limite });
+
+    return {
+      campo,
+      termo,
+      limite,
+      total: r.total,
+      casados: r.casados,
+      truncado: r.linhas.length < r.total,
+      colunas: BUSCA_COLUNAS_QLIK.map(c => c.titulo),
+      linhas: r.linhas
     };
   }
 
@@ -2568,7 +2820,9 @@
       const resultsTime = this.shadow.getElementById('resultsTime');
 
       resultsBox.style.display = 'flex';
-      const fonte = this.selectedTool.local ? 'Consultando a Julia (TRF5)...' : 'Processando requisição no Apoia MCP...';
+      const fonte = !this.selectedTool.local
+        ? 'Processando requisição no Apoia MCP...'
+        : (this.selectedTool.name === 'buscaProcessualUnificada' ? 'Consultando o painel do TRF5...' : 'Consultando a Julia (TRF5)...');
       resultsContent.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--text-muted);"><div class="loader"></div> ${fonte}</div>`;
 
       resultsBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2602,7 +2856,7 @@
           this.openSettingsPanel({ focusToken: true });
         } else {
           const info = this.selectedTool?.local
-            ? { title: 'Falha ao consultar a Julia (TRF5)', body: err.message || 'Erro desconhecido' }
+            ? { title: this.selectedTool.name === 'buscaProcessualUnificada' ? 'Falha ao consultar o painel do TRF5' : 'Falha ao consultar a Julia (TRF5)', body: err.message || 'Erro desconhecido' }
             : this.interpretServiceError(err.message || 'Falha ao executar ferramenta no servidor Apoia');
           resultsContent.innerHTML = `
             <div class="error-card">
@@ -2675,6 +2929,8 @@
         this.renderProcessMetadata(body, data);
       } else if (toolName === 'juliaDecisions') {
         this.renderJuliaDecisions(body, data);
+      } else if (toolName === 'buscaProcessualUnificada') {
+        this.renderBuscaUnificada(body, data);
       } else if (toolName === 'precedentFullText') {
         this.renderPrecedentFullText(body, data);
       } else if (toolName === 'piecesText') {
@@ -2882,6 +3138,7 @@
       const inicio = performance.now();
       let data;
       if (name === 'juliaDecisions') data = await executarJuliaDecisions(args);
+      else if (name === 'buscaProcessualUnificada') data = await executarBuscaProcessualUnificada(args);
       else throw { message: `Ferramenta local desconhecida: ${name}` };
       return {
         raw: null,
@@ -2977,6 +3234,67 @@
 
         container.appendChild(card);
       });
+    }
+
+    // Busca Processual Unificada (painel Qlik): tabela com as mesmas colunas da tela.
+    renderBuscaUnificada(container, data) {
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+      const linhas = data?.linhas || [];
+      const colunas = data?.colunas || [];
+      const card = document.createElement('div');
+      card.className = 'proc-card';
+
+      const cabecalho = `
+        <div class="proc-header">
+          <div>
+            <div class="proc-num">Busca Processual Unificada</div>
+            <div style="font-size: 11px; color: var(--text-muted);">
+              ${esc(data?.campo)} = ${esc(data?.termo)} · ${esc(String(data?.total ?? 0))} registro(s)
+            </div>
+          </div>
+          <span class="badge-court">TRF5 · 1º/2º GRAU</span>
+        </div>`;
+
+      if (!linhas.length) {
+        card.innerHTML = cabecalho + `<div class="julia-dec-sub" style="font-style: italic;">Nenhum registro encontrado neste painel. Ele cobre 1º e 2º grau da 5ª Região (PJe, PJe 2.x, Creta, Tebas, SEEU, Esparta), com carga diária do Portal BI.</div>`;
+        container.appendChild(card);
+        return;
+      }
+
+      const th = colunas.map(c => `<th>${esc(c)}</th>`).join('');
+      const tb = linhas.map(r => `<tr>${r.map((v, i) => {
+        const titulo = colunas[i];
+        if (titulo === 'Consulta' && /^https?:\/\//i.test(String(v || ''))) {
+          return `<td><a href="${esc(v)}" target="_blank" rel="noopener noreferrer" style="color: var(--primary-accent);">Abrir</a></td>`;
+        }
+        if (titulo === 'Número do Processo') {
+          return `<td style="font-family: var(--font-mono); white-space: nowrap;">${esc(v)}</td>`;
+        }
+        return `<td>${esc(v)}</td>`;
+      }).join('')}</tr>`).join('');
+
+      card.innerHTML = cabecalho + `
+        <div style="overflow-x: auto;">
+          <table class="data-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>
+        </div>
+        ${data?.truncado ? `<div class="julia-dec-sub">Exibindo ${esc(String(linhas.length))} de ${esc(String(data.total))} registros — aumente o "limite" para ver mais.</div>` : ''}
+        <div class="julia-dec-sub">Documento das partes mascarado, como na tela do painel. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5).</div>
+      `;
+      container.appendChild(card);
+    }
+
+    buscaUnificadaToMarkdown(data) {
+      const linhas = data?.linhas || [];
+      const colunas = data?.colunas || [];
+      let out = `## Busca Processual Unificada\n\n`;
+      out += `- **Campo:** ${data?.campo || ''}\n- **Termo pesquisado:** ${data?.termo || ''}\n- **Registros:** ${data?.total ?? 0}\n\n`;
+      if (!linhas.length) return out + `_Nenhum registro encontrado._\n`;
+      out += `| ${colunas.join(' | ')} |\n| ${colunas.map(() => '---').join(' | ')} |\n`;
+      linhas.forEach(r => {
+        out += `| ${colunas.map((c, i) => String(r[i] ?? '').replace(/\|/g, '\\|')).join(' | ')} |\n`;
+      });
+      if (data?.truncado) out += `\n_Exibindo ${linhas.length} de ${data.total} registros._\n`;
+      return out;
     }
 
     juliaToMarkdown(data) {
@@ -3391,6 +3709,10 @@
 
       if (toolName === 'juliaDecisions') {
         return this.juliaToMarkdown(data);
+      }
+
+      if (toolName === 'buscaProcessualUnificada') {
+        return this.buscaUnificadaToMarkdown(data);
       }
 
       if (toolName === 'precedentFullText') {
