@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.8.0
+// @version      1.8.1
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -465,9 +465,12 @@
     const t = String(termo || '').trim();
     if (campo === 'CPF/CNPJ') {
       const digitos = t.replace(/\D/g, '');
-      // O campo guarda o documento sem máscara; o curinga cobre CPF (11) e
-      // CNPJ (14) e eventuais zeros à esquerda.
-      return digitos ? `*${digitos}*` : t;
+      if (!digitos) return t;
+      // O campo guarda o documento COM a máscara (ex.: "170.340.003-87"), então
+      // procurar os dígitos corridos ("*17034000387*") não casa nada. Intercalar
+      // "*" entre os dígitos faz o motor ignorar a pontuação — e assim serve
+      // tanto para CPF/CNPJ digitado com máscara quanto só com números.
+      return `*${digitos.split('').join('*')}*`;
     }
     if (campo === 'Número do Processo') {
       const digitos = t.replace(/\D/g, '');
