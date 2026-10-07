@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.8.1
+// @version      1.9.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -440,20 +440,26 @@
     'Classe Judicial': 'Classe Judicial'
   };
 
-  // Colunas da tabela, na mesma ordem do painel. "Parte Documento" é a versão
-  // mascarada do documento (o campo com o CPF/CNPJ completo é o "CPF/CNPJ",
-  // usado apenas para pesquisar, nunca para exibir).
+  // Colunas da tabela, na mesma ordem do painel, acrescidas do tipo de pessoa e
+  // da data da 1ª distribuição (que o modelo tem, mas a tela não mostra). "Parte
+  // Documento" é a versão mascarada do documento (o campo com o CPF/CNPJ completo
+  // é o "CPF/CNPJ", usado apenas para pesquisar, nunca para exibir).
   const BUSCA_COLUNAS_QLIK = [
     { campo: 'Parte Descrição', titulo: 'Nome' },
     { campo: 'Parte Descrição Tipo', titulo: 'Sujeito Processual' },
+    { campo: 'Parte Tipo Pessoa', titulo: 'Pessoa' },
     { campo: 'Parte Documento', titulo: 'CPF/CNPJ' },
     { campo: 'Número Processo', titulo: 'Número do Processo' },
-    { campo: 'Link', titulo: 'Consulta' },
+    // A data vem como serial do Qlik (ex.: 43716) e é formatada em JS: usar
+    // =Date(...) como dimensão calculada faz o motor montar a tabela em ~26s em
+    // vez de ~2s, por isso o campo entra cru e a conversão é feita aqui.
+    { campo: 'Data Primeira Distribuição', titulo: '1ª Distribuição', tipo: 'data' },
     { campo: 'Classe Judicial', titulo: 'Classe Judicial' },
     { campo: 'Sistema', titulo: 'Sistema' },
     { campo: '%SJ_PROCESSO_TRF', titulo: 'Seção' },
     { campo: 'Grau', titulo: 'Grau' },
-    { campo: 'Instância', titulo: 'Instância' }
+    { campo: 'Instância', titulo: 'Instância' },
+    { campo: 'Link', titulo: 'Consulta' }
   ];
 
   const BUSCA_LIMITE_MAX = 500;
@@ -501,40 +507,62 @@ function send(method, handle, params) {
   ws.send(JSON.stringify({ jsonrpc: '2.0', id: id, method: method, handle: handle, params: params }));
   return new Promise(function (res) { pend[id] = res; });
 }
-function consultar() {
-  return send('OpenDoc', -1, { qDocName: SPEC.appId, qUserName: null, qPassword: null, qSerial: null, qNoData: false }).then(function (od) {
-    if (od.error) { throw new Error(od.error.message || 'OpenDoc falhou'); }
-    var h = od.result.qReturn.qHandle;
-    return send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaLb' }, qListObjectDef: { qDef: { qFieldDefs: [SPEC.campo] }, qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: 1, qHeight: 1 }] } } }).then(function (lb) {
-      if (lb.error) { throw new Error(lb.error.message || 'Criação da busca falhou'); }
-      var lbH = lb.result.qReturn.qHandle;
-      return send('SearchListObjectFor', lbH, { qPath: '/qListObjectDef', qMatch: SPEC.termo }).then(function (sr) {
-        if (sr.error) { throw new Error(sr.error.message || 'Busca falhou'); }
-        return send('GetLayout', lbH, {}).then(function (lay) {
-          var lo = lay.result && lay.result.qLayout ? lay.result.qLayout.qListObject : null;
-          var casados = lo && lo.qSize ? lo.qSize.qcy : 0;
-          if (!casados) { return encerrar(true, { total: 0, casados: 0, linhas: [] }); }
-          return send('AcceptListObjectSearch', lbH, { qPath: '/qListObjectDef', qToggleMode: false, qSoftLock: false }).then(function (ac) {
-            if (ac.error) { throw new Error(ac.error.message || 'Seleção falhou'); }
-            var dims = SPEC.colunas.map(function (f) { return { qDef: { qFieldDefs: [f] } }; });
-            return send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaTab' }, qHyperCubeDef: { qDimensions: dims, qMeasures: [], qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: SPEC.colunas.length, qHeight: SPEC.limite }] } } }).then(function (cb) {
-              if (cb.error) { throw new Error(cb.error.message || 'Montagem da tabela falhou'); }
-              return send('GetLayout', cb.result.qReturn.qHandle, {}).then(function (gl) {
-                if (gl.error) { throw new Error(gl.error.message || 'Leitura da tabela falhou'); }
-                var hc = gl.result.qLayout.qHyperCube;
-                var pag = (hc.qDataPages && hc.qDataPages[0]) || null;
-                var linhas = ((pag && pag.qMatrix) || []).map(function (r) {
-                  return r.map(function (c) { return c ? c.qText : ''; });
-                });
-                encerrar(true, { total: hc.qSize.qcy, casados: casados, linhas: linhas });
-              });
-            });
-          });
-        });
-      });
-    });
-  });
+// Datas do Qlik chegam como serial (dias desde 1899-12-30); o tipo da coluna diz
+// quais precisam ser convertidas. Math.floor descarta a hora (08/09 21h = 08/09).
+function celula(c, tipo) {
+  if (!c) { return ''; }
+  if (tipo === 'data' && typeof c.qNum === 'number' && isFinite(c.qNum) && c.qNum > 0) {
+    var d = new Date(Date.UTC(1899, 11, 30) + Math.floor(c.qNum) * 86400000);
+    var p = function (x) { return (x < 10 ? '0' : '') + x; };
+    return p(d.getUTCDate()) + '/' + p(d.getUTCMonth() + 1) + '/' + d.getUTCFullYear();
+  }
+  return c.qText;
 }
+async function consultar() {
+  var od = await send('OpenDoc', -1, { qDocName: SPEC.appId, qUserName: null, qPassword: null, qSerial: null, qNoData: false });
+  if (od.error) { throw new Error(od.error.message || 'OpenDoc falhou'); }
+  var h = od.result.qReturn.qHandle;
+
+  var lb = await send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaLb' }, qListObjectDef: { qDef: { qFieldDefs: [SPEC.campo] }, qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: 1, qHeight: 1 }] } } });
+  if (lb.error) { throw new Error(lb.error.message || 'Criação da busca falhou'); }
+  var lbH = lb.result.qReturn.qHandle;
+
+  var sr = await send('SearchListObjectFor', lbH, { qPath: '/qListObjectDef', qMatch: SPEC.termo });
+  if (sr.error) { throw new Error(sr.error.message || 'Busca falhou'); }
+
+  // O motor pode responder à leitura antes de a busca estar aplicada — a lista
+  // aparece momentaneamente vazia. Sem confirmar, uma busca com resultados era
+  // anunciada como "nenhum registro". Só depois de 3 leituras vazias seguidas é
+  // que se conclui que não há correspondência.
+  var casados = 0;
+  for (var tentativa = 0; tentativa < 3 && !casados; tentativa++) {
+    if (tentativa) { await esperar(350); }
+    var dados = await send('GetListObjectData', lbH, { qPath: '/qListObjectDef', qPages: [{ qTop: 0, qLeft: 0, qWidth: 1, qHeight: 1 }] });
+    var pagBusca = dados && dados.result ? dados.result.qDataPages : null;
+    var naPagina = pagBusca && pagBusca[0] && pagBusca[0].qMatrix ? pagBusca[0].qMatrix.length : 0;
+    var lay = await send('GetLayout', lbH, {});
+    var lo = lay && lay.result && lay.result.qLayout ? lay.result.qLayout.qListObject : null;
+    casados = Math.max(naPagina, lo && lo.qSize ? lo.qSize.qcy : 0);
+  }
+  if (!casados) { return encerrar(true, { total: 0, casados: 0, linhas: [] }); }
+
+  var ac = await send('AcceptListObjectSearch', lbH, { qPath: '/qListObjectDef', qToggleMode: false, qSoftLock: false });
+  if (ac.error) { throw new Error(ac.error.message || 'Seleção falhou'); }
+
+  var dims = SPEC.colunas.map(function (f) { return { qDef: { qFieldDefs: [f] } }; });
+  var cb = await send('CreateSessionObject', h, { qProp: { qInfo: { qType: 'apoiaBuscaTab' }, qHyperCubeDef: { qDimensions: dims, qMeasures: [], qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: SPEC.colunas.length, qHeight: SPEC.limite }] } } });
+  if (cb.error) { throw new Error(cb.error.message || 'Montagem da tabela falhou'); }
+
+  var gl = await send('GetLayout', cb.result.qReturn.qHandle, {});
+  if (gl.error) { throw new Error(gl.error.message || 'Leitura da tabela falhou'); }
+  var hc = gl.result.qLayout.qHyperCube;
+  var pag = (hc.qDataPages && hc.qDataPages[0]) || null;
+  var linhas = ((pag && pag.qMatrix) || []).map(function (r) {
+    return r.map(function (c, i) { return celula(c, SPEC.tipos && SPEC.tipos[i]); });
+  });
+  encerrar(true, { total: hc.qSize.qcy, casados: casados, linhas: linhas });
+}
+function esperar(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function iniciar() {
   try { ws = new WebSocket('wss://' + SPEC.host + '/app/' + SPEC.appId); }
   catch (e) { return falha('Não foi possível abrir a conexão com o painel do TRF5.'); }
@@ -562,6 +590,7 @@ iniciar();
         campo,
         termo,
         colunas: BUSCA_COLUNAS_QLIK.map(c => c.campo),
+        tipos: BUSCA_COLUNAS_QLIK.map(c => c.tipo || 'texto'),
         limite,
         tempoLimite: BUSCA_TIMEOUT_MS - 5000
       };
@@ -3268,10 +3297,14 @@ iniciar();
       const tb = linhas.map(r => `<tr>${r.map((v, i) => {
         const titulo = colunas[i];
         if (titulo === 'Consulta' && /^https?:\/\//i.test(String(v || ''))) {
-          return `<td><a href="${esc(v)}" target="_blank" rel="noopener noreferrer" style="color: var(--primary-accent);">Abrir</a></td>`;
+          return `<td><a href="${esc(v)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(v)}). A página não aceita o número pela URL: a busca tem de ser feita lá." style="color: var(--primary-accent);">Abrir</a></td>`;
         }
         if (titulo === 'Número do Processo') {
           return `<td style="font-family: var(--font-mono); white-space: nowrap;">${esc(v)}</td>`;
+        }
+        if (titulo === 'Pessoa') {
+          const tipo = v === 'F' ? 'Física' : (v === 'J' ? 'Jurídica' : v);
+          return `<td style="white-space: nowrap;">${esc(tipo)}</td>`;
         }
         return `<td>${esc(v)}</td>`;
       }).join('')}</tr>`).join('');
@@ -3281,7 +3314,7 @@ iniciar();
           <table class="data-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>
         </div>
         ${data?.truncado ? `<div class="julia-dec-sub">Exibindo ${esc(String(linhas.length))} de ${esc(String(data.total))} registros — aumente o "limite" para ver mais.</div>` : ''}
-        <div class="julia-dec-sub">Documento das partes mascarado, como na tela do painel. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5).</div>
+        <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). O "Abrir" leva à consulta pública do sistema (Creta, PJe, Tebas, SEEU…), que não recebe o número do processo pela URL.</div>
       `;
       container.appendChild(card);
     }
