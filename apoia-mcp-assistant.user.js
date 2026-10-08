@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.10.0
+// @version      1.11.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -48,6 +48,16 @@
     sepia: 'Modo Sépia'
   };
 
+  // De onde vem cada ferramenta. O painel separa visualmente as do Apoia MCP
+  // (dependem do token) das consultas públicas do TRF5 (funcionam sem ele).
+  const FONTES = {
+    apoia: { rotulo: 'Apoia MCP', grupo: 'apoia', classe: 'src-apoia', nota: 'Requer o token do Apoia' },
+    julia: { rotulo: 'Julia TRF5', grupo: 'trf5', classe: 'src-trf5', nota: 'Consulta pública da Julia — não usa o token do Apoia' },
+    painel: { rotulo: 'Painel BI TRF5', grupo: 'trf5', classe: 'src-trf5', nota: 'Consulta pública ao Portal BI — não usa o token do Apoia' }
+  };
+
+  const fonteDe = (tool) => FONTES[TOOL_META[tool?.name]?.fonte] || FONTES.apoia;
+
   const ICONS = {
     justice: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></svg>`,
     search: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
@@ -91,6 +101,7 @@
     juliaDecisions: {
       category: 'processos',
       displayName: 'Decisões (Julia TRF5)',
+      fonte: 'julia',
       helpNotice: 'Consulta direta à Julia (TRF5), sem passar pelo Apoia — funciona mesmo com o token expirado. Cobre sentenças, acórdãos de TR/TRU e ementas do TRF5 indexados (apenas PJe). O resultado e o resumo do dispositivo são extraídos por heurística: confira na íntegra.',
       helpUrl: 'https://juliapesquisa.trf5.jus.br/julia-pesquisa/',
       helpUrlLabel: 'Abrir Julia | Pesquisa Inteligente',
@@ -99,6 +110,7 @@
     buscaProcessualUnificada: {
       category: 'processos',
       displayName: 'Busca Processual Unificada',
+      fonte: 'painel',
       helpNotice: 'Consulta o painel "Busca Processual Unificada" do TRF5 (Portal BI, carga diária) — 1º e 2º grau da 5ª Região, por nome, CPF/CNPJ, número ou classe. É a mesma base do painel, lida direto no assistente, sem abrir aba. O documento das partes aparece mascarado, como na tela. Buscas amplas (um prenome, uma classe inteira) podem demorar.',
       helpUrl: 'https://transparencia.trf5.jus.br/single/?appid=7265b9ec-528e-4fe8-9291-42f8d1e93180',
       helpUrlLabel: 'Abrir o painel do TRF5',
@@ -256,6 +268,26 @@
     return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
   }
 
+  // Meses abreviados para os períodos das abas de instância (ex.: mar/2020).
+  function mesAno(iso) {
+    const m = /^(\d{4})-(\d{2})/.exec(iso || '');
+    if (!m) return '?';
+    const meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    return `${meses[Number(m[2]) - 1]}/${m[1]}`;
+  }
+
+  // Alguns registros migrados chegam com UTF-8 lido como Latin-1
+  // («tramitaÃ§Ã£o»). Só reinterpreta quando o padrão aparece e a releitura
+  // é UTF-8 válido; caso contrário, devolve o texto como veio.
+  function corrigirMojibake(texto) {
+    if (typeof texto !== 'string' || !/\u00C3[\u0080-\u00BF]/.test(texto) || !/^[\u0000-\u00FF]*$/.test(texto)) return texto;
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(texto, c => c.charCodeAt(0)));
+    } catch (e) {
+      return texto;
+    }
+  }
+
   // O texto chega com quebras e espaços soltos e, às vezes, restos de HTML do
   // Word (<!--[endif]-->). Mesmo critério de parágrafo da página da Julia.
   function normalizarTextoJulia(texto) {
@@ -365,13 +397,18 @@
 
   async function consultarJulia(numero) {
     const json = await juliaGetJson(JULIA_API_BASE + numero);
+    // Além da duplicata exata (mesmo codigoDocumento), a Julia indexa a mesma
+    // decisão uma vez por registro do PJe quando o processo foi migrado de
+    // sistema: códigos diferentes, mesmo tipo, data e texto. Uma só basta.
     const unicos = new Map();
     for (const d of json.resultado || []) {
-      if (!unicos.has(d.codigoDocumento)) unicos.set(d.codigoDocumento, d);
+      const texto = normalizarTextoJulia(d.texto || d.ementa);
+      const chave = texto ? `${d.tipoDocumento}|${d.dataJulgamento}|${texto}` : d.codigoDocumento;
+      if (!unicos.has(chave)) unicos.set(chave, { ...d, textoNormalizado: texto });
     }
     return [...unicos.values()]
       .map(d => {
-        const texto = normalizarTextoJulia(d.texto || d.ementa);
+        const texto = d.textoNormalizado;
         const dispositivo = extrairDispositivo(d.tipoDocumento, texto);
         return {
           codigoDocumento: d.codigoDocumento,
@@ -1129,6 +1166,11 @@ iniciar();
       --danger: #dc2626;
       --danger-bg: #450a0a;
       --danger-text: #fca5a5;
+      --src-apoia: #60a5fa;
+      --src-apoia-bg: rgba(96, 165, 250, 0.12);
+      --src-trf5: #2dd4bf;
+      --src-trf5-bg: rgba(45, 212, 191, 0.12);
+      --ok: #34d399;
       --radius-sm: 4px;
       --radius-md: 6px;
       font-family: var(--font-sans);
@@ -1184,6 +1226,11 @@ iniciar();
       --danger: #dc2626;
       --danger-bg: #fef2f2;
       --danger-text: #991b1b;
+      --src-apoia: #1d4ed8;
+      --src-apoia-bg: #eff6ff;
+      --src-trf5: #0f766e;
+      --src-trf5-bg: #ecfdf5;
+      --ok: #059669;
     }
 
     /* MODO SÉPIA (LEITURA JURÍDICA / PAPEL) */
@@ -1231,6 +1278,11 @@ iniciar();
       --danger: #b91c1c;
       --danger-bg: #fdf2e9;
       --danger-text: #7f1d1d;
+      --src-apoia: #7a4a1e;
+      --src-apoia-bg: #ead9bd;
+      --src-trf5: #2f6b4f;
+      --src-trf5-bg: #dbe8d2;
+      --ok: #2b6e22;
     }
 
     *, *::before, *::after {
@@ -1362,30 +1414,202 @@ iniciar();
       border-color: var(--badge-court-border);
     }
 
-    .token-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: var(--bg-token-bar);
-      border-bottom: 1px solid var(--border-color);
-      padding: 8px 16px;
-      font-size: 12px;
+    /* Indicador de token expirado sobre o ícone de Configurações. */
+    .btn-icon.has-alert {
+      position: relative;
+      color: var(--danger-text);
     }
 
-    .token-bar.expired {
-      background: var(--danger-bg);
-      border-bottom-color: var(--danger);
+    .btn-icon.has-alert::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--danger);
     }
 
-    .token-bar-status {
+    /* ---------- Fontes de dados: Apoia MCP (com token) x TRF5 (públicas) ---------- */
+    .src-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      white-space: nowrap;
+    }
+
+    .src-chip.src-apoia { color: var(--src-apoia); background: var(--src-apoia-bg); }
+    .src-chip.src-trf5 { color: var(--src-trf5); background: var(--src-trf5-bg); }
+
+    .tools-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .tool-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .tool-group-head {
       display: flex;
       align-items: center;
-      gap: 6px;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-bottom: 6px;
+      border-bottom: 2px solid var(--group-color);
+    }
+
+    .tool-group.src-apoia { --group-color: var(--src-apoia); --group-bg: var(--src-apoia-bg); }
+    .tool-group.src-trf5 { --group-color: var(--src-trf5); --group-bg: var(--src-trf5-bg); }
+
+    .tool-group-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--group-color);
+    }
+
+    .tool-group-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      flex: 1;
+      min-width: 140px;
+    }
+
+    .group-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
       color: var(--text-muted);
     }
 
-    .token-bar.expired .token-bar-status {
+    .group-status::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-dim);
+    }
+
+    .group-status.ok { color: var(--ok); }
+    .group-status.ok::before { background: var(--ok); }
+    .group-status.expired, .group-status.error { color: var(--danger-text); }
+    .group-status.expired::before, .group-status.error::before { background: var(--danger); }
+
+    .group-link {
+      background: transparent;
+      border: none;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--primary-accent);
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 0;
+    }
+
+    .group-link:hover { text-decoration: underline; }
+
+    .group-empty {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      background: var(--bg-surface);
+      border: 1px dashed var(--border-light);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tool-group .tool-card {
+      border-left: 3px solid var(--group-color);
+    }
+
+    .runner-source {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .runner-panel.src-apoia { border-top: 3px solid var(--src-apoia); }
+    .runner-panel.src-trf5 { border-top: 3px solid var(--src-trf5); }
+
+    /* ---------- Visões exclusivas do painel ----------
+       Uma só visão por vez (lista, ferramenta, configurações, histórico):
+       nada de painéis "esquecidos" abaixo do resultado de outra ferramenta. */
+    .apoia-drawer .view-tools,
+    .apoia-drawer .runner-panel,
+    .apoia-drawer #settingsPanel,
+    .apoia-drawer #historyPanel {
+      display: none;
+    }
+
+    .apoia-drawer[data-view="tools"] .view-tools,
+    .apoia-drawer[data-view="runner"] .runner-panel,
+    .apoia-drawer[data-view="settings"] #settingsPanel,
+    .apoia-drawer[data-view="history"] #historyPanel {
+      display: flex;
+    }
+
+    .apoia-drawer:not([data-view="tools"]) .drawer-nav {
+      display: none;
+    }
+
+    .view-tools {
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .panel-head {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .panel-sub {
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+
+    .settings-alert {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger);
+      border-radius: var(--radius-sm);
       color: var(--danger-text);
+      padding: 8px 10px;
+      font-size: 11.5px;
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
     }
 
     .token-link-btn {
@@ -1400,6 +1624,8 @@ iniciar();
       text-decoration: none;
       font-size: 11.5px;
       font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
       transition: background 0.15s ease;
     }
 
@@ -1534,13 +1760,6 @@ iniciar();
     .runner-head {
       padding-bottom: 10px;
       border-bottom: 1px solid var(--border-color);
-    }
-
-    /* Modo ferramenta selecionada: oculta busca e grade para o formulário
-       ocupar o painel inteiro; o retorno é feito pelo botão Voltar ou Esc. */
-    .apoia-drawer.tool-view .search-box,
-    .apoia-drawer.tool-view .tools-grid {
-      display: none;
     }
 
     .btn-back {
@@ -1806,16 +2025,12 @@ iniciar();
     }
 
     /* Modo expandido: os resultados ocupam toda a altura do painel,
-       ocultando busca, grade de ferramentas e o formulário acima. */
-    .apoia-drawer.results-maximized .search-box,
-    .apoia-drawer.results-maximized .tools-grid,
+       ocultando o formulário acima (só existe na visão da ferramenta). */
     .apoia-drawer.results-maximized .btn-back,
     .apoia-drawer.results-maximized .runner-head,
     .apoia-drawer.results-maximized #dynamicNoticeContainer,
     .apoia-drawer.results-maximized #dynamicFormContainer,
-    .apoia-drawer.results-maximized .runner-buttons,
-    .apoia-drawer.results-maximized #settingsPanel,
-    .apoia-drawer.results-maximized #historyPanel {
+    .apoia-drawer.results-maximized .runner-buttons {
       display: none !important;
     }
 
@@ -1839,14 +2054,8 @@ iniciar();
       max-height: none;
     }
 
-    /* No modo expandido, também some a barra de token e as abas de categoria,
-       o corpo perde o respiro lateral e a linha do tempo deixa de ter rolagem
-       própria (uma única rolagem, a do resultado). */
-    .apoia-drawer.results-maximized .token-bar,
-    .apoia-drawer.results-maximized .drawer-nav {
-      display: none !important;
-    }
-
+    /* No modo expandido, o corpo perde o respiro lateral e a linha do tempo
+       deixa de ter rolagem própria (uma única rolagem, a do resultado). */
     .apoia-drawer.results-maximized .drawer-body {
       padding: 8px;
       overflow: hidden;
@@ -2073,6 +2282,108 @@ iniciar();
       font-size: 11.5px;
     }
 
+    .proc-polo-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    /* Um mesmo número com vários registros (instâncias, recursos e sistema
+       anterior à migração): resumo + abas, uma por registro. */
+    .proc-registros-resumo {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+
+    .inst-tabs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 6px;
+    }
+
+    .inst-tab {
+      background: var(--bg-proc-item);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 7px 9px;
+      text-align: left;
+      font-family: inherit;
+      color: var(--text-main);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .inst-tab:hover {
+      border-color: var(--border-light);
+      background: var(--bg-hover);
+    }
+
+    .inst-tab.active {
+      border-color: var(--primary);
+      background: var(--bg-card-selected);
+      box-shadow: inset 0 0 0 1px var(--primary);
+    }
+
+    .inst-tab-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .inst-grau {
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .inst-sit {
+      font-size: 9.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 0 5px;
+      border-radius: 3px;
+      border: 1px solid currentColor;
+      white-space: nowrap;
+    }
+
+    .inst-sit.atual { color: var(--ok); }
+    .inst-sit.encerrado { color: var(--text-muted); }
+
+    .inst-tab-classe {
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+
+    .inst-tab-meta {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .proc-detail {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .proc-detail-head {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .proc-detail-head strong {
+      color: var(--text-main);
+    }
+
     .proc-movs-container {
       margin-top: 4px;
       border-top: 1px solid var(--border-color);
@@ -2274,6 +2585,36 @@ iniciar();
       font-weight: 600;
     }
 
+    /* Busca Unificada: cabeçalho de cada autuação, com as partes logo abaixo. */
+    .data-table tr.grp-row td {
+      background: var(--bg-proc-item);
+      border-top: 2px solid var(--border-light);
+      padding: 7px 8px;
+    }
+
+    .data-table tr.grp-row:first-child td {
+      border-top: none;
+    }
+
+    .grp-head {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px 8px;
+    }
+
+    .grp-info {
+      font-size: 11px;
+      color: var(--text-muted);
+      flex: 1;
+      min-width: 160px;
+    }
+
+    .grp-acao {
+      margin-left: auto;
+      font-size: 11px;
+    }
+
     .code-view {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -2348,12 +2689,19 @@ iniciar();
       this.isOpen = false;
       this.currentTab = 'all';
       this.selectedTool = null;
-      this.tools = [];
+      // As consultas TRF5 aparecem já na abertura; as do Apoia chegam com o tools/list.
+      this.tools = [...LOCAL_TOOLS];
       this.lastResult = null;
       this.currentResultView = 'visual';
       this.history = GM_getValue(STORAGE_KEYS.HISTORY, []);
       this.currentLoadedPieceText = '';
       this.currentTheme = GM_getValue(STORAGE_KEYS.THEME, 'dark');
+      // Visão atual do painel: 'tools' | 'runner' | 'settings' | 'history'.
+      this.view = 'tools';
+      this.returnView = 'tools';
+      // Conexão com o Apoia MCP: 'loading' | 'ok' | 'expired' | 'error'.
+      this.apoiaStatus = 'loading';
+      this.apoiaMsg = '';
 
       this.initDom();
       this.registerEvents();
@@ -2378,7 +2726,7 @@ iniciar();
         <div class="apoia-drawer-backdrop" id="drawerBackdrop"></div>
 
         <!-- Drawer Lateral (Acionado exclusivamente por Alt + M) -->
-        <div class="apoia-drawer" id="drawer" style="width: ${savedWidth};" data-theme="${this.currentTheme}">
+        <div class="apoia-drawer" id="drawer" style="width: ${savedWidth};" data-theme="${this.currentTheme}" data-view="tools">
           <div class="drawer-resizer" id="drawerResizer" title="Arraste para redimensionar o painel"></div>
 
           <div class="drawer-header">
@@ -2389,20 +2737,10 @@ iniciar();
             </div>
             <div class="drawer-actions">
               <button class="btn-icon" id="btnThemeToggle" title="Alterar Tema: Escuro / Claro / Sépia">${ICONS.moon}</button>
-              <button class="btn-icon" id="btnSettings" title="Configurações de Token">${ICONS.settings}</button>
+              <button class="btn-icon" id="btnSettings" title="Configurações (token do Apoia e tema)">${ICONS.settings}</button>
               <button class="btn-icon" id="btnHistory" title="Histórico de Consultas">${ICONS.history}</button>
               <button class="btn-icon" id="btnClose" title="Fechar (Esc)">${ICONS.x}</button>
             </div>
-          </div>
-
-          <div class="token-bar" id="tokenBar">
-            <div class="token-bar-status">
-              ${ICONS.key}
-              <span id="tokenStatusText">Conectado ao Apoia MCP</span>
-            </div>
-            <a href="${TOKEN_PORTAL_URL}" target="_blank" rel="noopener noreferrer" class="token-link-btn" title="Abre a página oficial para gerar ou renovar seu token de acesso">
-              Renovar Token ${ICONS.externalLink}
-            </a>
           </div>
 
           <div class="drawer-nav" id="drawerNav">
@@ -2414,16 +2752,19 @@ iniciar();
           </div>
 
           <div class="drawer-body" id="drawerBody">
-            <div class="search-box">
-              ${ICONS.search}
-              <input type="text" id="toolSearchInput" placeholder="Filtrar ferramentas..." />
+            <div class="view-tools">
+              <div class="search-box">
+                ${ICONS.search}
+                <input type="text" id="toolSearchInput" placeholder="Filtrar ferramentas..." />
+              </div>
+
+              <div class="tools-list" id="toolsList"></div>
             </div>
 
-            <div class="tools-grid" id="toolsGrid"></div>
-
-            <div class="runner-panel" id="runnerPanel" style="display: none;">
+            <div class="runner-panel" id="runnerPanel">
               <button type="button" class="btn-back" id="btnBackToTools" title="Voltar à lista de ferramentas (Esc)">← Ferramentas</button>
               <div class="runner-head">
+                <div class="runner-source" id="runnerSource"></div>
                 <div class="runner-title" id="runnerTitle">Ferramenta</div>
                 <div class="runner-desc" id="runnerDesc"></div>
               </div>
@@ -2467,9 +2808,13 @@ iniciar();
               </div>
             </div>
 
-            <div class="settings-box" id="settingsPanel" style="display: none;">
-              <div style="font-size: 13px; font-weight: 700; color: var(--text-main); margin-bottom: 2px;">Configuração do Apoia MCP</div>
-              <div style="font-size: 11.5px; color: var(--text-muted);">Informe seu token temporário obtido no portal Apoia.</div>
+            <div class="settings-box" id="settingsPanel">
+              <div class="panel-head">
+                <button type="button" class="btn-back" data-panel-back title="Voltar (Esc)">← Voltar</button>
+                <div class="panel-title">Configurações</div>
+                <div class="panel-sub">O token vale só para as ferramentas <span class="src-chip src-apoia">Apoia MCP</span>. As consultas <span class="src-chip src-trf5">TRF5</span> (Julia e Busca Unificada) são públicas e funcionam sem ele.</div>
+              </div>
+              <div class="settings-alert" id="settingsAlert" style="display: none;">${ICONS.alert} <span id="settingsAlertText"></span></div>
 
               <div class="form-group">
                 <label class="form-label">Token ou URL MCP Completa:</label>
@@ -2497,10 +2842,13 @@ iniciar();
               </div>
             </div>
 
-            <div class="settings-box" id="historyPanel" style="display: none;">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div style="font-size: 13px; font-weight: 700; color: var(--text-main);">Histórico de Consultas</div>
-                <button class="btn btn-secondary" id="btnClearHistory" style="padding: 3px 6px; font-size: 11px;">Limpar</button>
+            <div class="settings-box" id="historyPanel">
+              <div class="panel-head">
+                <button type="button" class="btn-back" data-panel-back title="Voltar (Esc)">← Voltar</button>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <div class="panel-title">Histórico de Consultas</div>
+                  <button class="btn btn-secondary" id="btnClearHistory" style="padding: 3px 6px; font-size: 11px;">Limpar</button>
+                </div>
               </div>
               <div id="historyList" style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;"></div>
             </div>
@@ -2627,61 +2975,98 @@ iniciar();
       }
     }
 
-    async loadTools() {
+    // Devolve true se o Apoia MCP respondeu. Com token recusado, abre as
+    // Configurações — só se o usuário ainda estiver na lista de ferramentas,
+    // para não arrancá-lo de uma consulta pública (Julia/TRF5) em andamento.
+    async loadTools({ abrirConfigSeExpirado = true } = {}) {
+      this.updateTokenStatus('loading');
       try {
         const rawTools = await this.client.listTools();
         this.tools = [...LOCAL_TOOLS, ...rawTools];
-        this.renderToolsGrid();
-        this.updateTokenStatus(true);
+        this.updateTokenStatus('ok');
+        return true;
       } catch (err) {
         console.warn('[Apoia MCP] Erro ao carregar ferramentas:', err);
-        // As ferramentas locais (Julia) não dependem do token do Apoia.
+        // As ferramentas locais (Julia, Busca Unificada) não dependem do token do Apoia.
         this.tools = [...LOCAL_TOOLS];
-        this.renderToolsGrid();
-        this.updateTokenStatus(false, err.message || 'Token expirado ou inválido.');
-        if (err.isAuthError) this.openSettingsPanel({ focusToken: true });
+        if (err.isAuthError) {
+          this.updateTokenStatus('expired', 'Token expirado ou inválido');
+          if (abrirConfigSeExpirado && this.view === 'tools') {
+            this.openSettingsPanel({ focusToken: true, alerta: 'Seu token do Apoia expirou ou é inválido. Cole um novo token abaixo — as consultas TRF5 continuam disponíveis enquanto isso.' });
+          }
+        } else {
+          this.updateTokenStatus('error', err.message || 'Falha ao conectar ao Apoia MCP');
+        }
+        return false;
       }
     }
 
-    // Exibe o painel de Configurações (fechando Histórico e o modo expandido)
-    // e, opcionalmente, posiciona o cursor no campo de token para renovação rápida.
-    openSettingsPanel({ focusToken = false } = {}) {
-      const settingsPanel = this.shadow.getElementById('settingsPanel');
+    // Troca a visão do painel. Configurações e Histórico lembram de onde o
+    // usuário veio (lista ou ferramenta, com o resultado preservado) para o "Voltar".
+    setView(view) {
+      const painel = (v) => v === 'settings' || v === 'history';
+      if (painel(view) && !painel(this.view)) this.returnView = this.view;
+      this.view = view;
+
+      const drawer = this.shadow.getElementById('drawer');
+      drawer.dataset.view = view;
+      if (view !== 'runner') this.toggleMaximizeResults(false);
+      this.shadow.getElementById('btnSettings').classList.toggle('active', view === 'settings');
+      this.shadow.getElementById('btnHistory').classList.toggle('active', view === 'history');
+      this.shadow.getElementById('drawerBody').scrollTop = 0;
+    }
+
+    closePanel() {
+      this.setView(this.returnView === 'runner' && this.selectedTool ? 'runner' : 'tools');
+    }
+
+    // Exibe as Configurações e, opcionalmente, um alerta e o cursor no campo
+    // de token para renovação rápida.
+    openSettingsPanel({ focusToken = false, alerta = '' } = {}) {
       const tokenInput = this.shadow.getElementById('cfgTokenInput');
 
-      this.toggleMaximizeResults(false);
-      this.shadow.getElementById('historyPanel').style.display = 'none';
-      this.shadow.getElementById('btnHistory').classList.remove('active');
-
-      settingsPanel.style.display = 'flex';
-      this.shadow.getElementById('btnSettings').classList.add('active');
+      this.setView('settings');
+      this.setSettingsAlert(alerta);
       tokenInput.value = this.client.token;
       this.shadow.getElementById('cfgUrlInput').value = this.client.baseUrl;
       this.shadow.getElementById('cfgThemeSelect').value = this.currentTheme;
 
       if (focusToken && this.isOpen) {
-        settingsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         tokenInput.focus();
         tokenInput.select();
       }
     }
 
-    updateTokenStatus(isValid, msg) {
-      const bar = this.shadow.getElementById('tokenBar');
-      const text = this.shadow.getElementById('tokenStatusText');
-
-      if (isValid) {
-        bar.classList.remove('expired');
-        text.textContent = 'Conectado ao Apoia MCP';
-      } else {
-        bar.classList.add('expired');
-        text.textContent = msg || 'Token expirado ou inválido';
-      }
+    setSettingsAlert(msg) {
+      this.shadow.getElementById('settingsAlert').style.display = msg ? 'flex' : 'none';
+      this.shadow.getElementById('settingsAlertText').textContent = msg || '';
     }
 
+    updateTokenStatus(status, msg = '') {
+      this.apoiaStatus = status;
+      this.apoiaMsg = msg;
+      const btn = this.shadow.getElementById('btnSettings');
+      const alerta = status === 'expired' || status === 'error';
+      btn.classList.toggle('has-alert', alerta);
+      btn.title = alerta
+        ? `Configurações — ${msg || 'token do Apoia com problema'}`
+        : 'Configurações (token do Apoia e tema)';
+      this.renderToolsGrid(this.shadow.getElementById('toolSearchInput').value);
+      if (this.view === 'runner' && this.selectedTool) this.renderRunnerSource(this.selectedTool);
+    }
+
+    apoiaStatusHtml() {
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+      if (this.apoiaStatus === 'ok') return `<span class="group-status ok">Conectado</span>`;
+      if (this.apoiaStatus === 'loading') return `<span class="group-status">Conectando…</span>`;
+      if (this.apoiaStatus === 'expired') return `<span class="group-status expired">Token expirado</span>`;
+      return `<span class="group-status error" title="${esc(this.apoiaMsg)}">Sem conexão</span>`;
+    }
+
+    // Lista de ferramentas em dois blocos: Apoia MCP (com token) e TRF5 (públicas).
     renderToolsGrid(filterText = '') {
-      const grid = this.shadow.getElementById('toolsGrid');
-      grid.innerHTML = '';
+      const list = this.shadow.getElementById('toolsList');
+      list.innerHTML = '';
       const search = filterText.toLowerCase().trim();
 
       const filtered = this.tools.filter(tool => {
@@ -2695,36 +3080,101 @@ iniciar();
         return matchCategory && matchSearch;
       });
 
-      if (filtered.length === 0) {
-        grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-dim); padding: 16px;">Nenhuma ferramenta encontrada.</div>`;
-        return;
-      }
+      const grupos = [
+        {
+          id: 'apoia',
+          classe: 'src-apoia',
+          titulo: 'Apoia MCP',
+          sub: 'Ferramentas do PDPJ · usam o seu token',
+          extra: `${this.apoiaStatusHtml()}<a class="group-link" href="${TOKEN_PORTAL_URL}" target="_blank" rel="noopener noreferrer" title="Abre a página oficial para gerar ou renovar seu token">Renovar token ${ICONS.externalLink}</a>`
+        },
+        {
+          id: 'trf5',
+          classe: 'src-trf5',
+          titulo: 'TRF5 · consultas públicas',
+          sub: 'Julia e Portal BI · funcionam sem o token do Apoia',
+          extra: ''
+        }
+      ];
 
-      filtered.forEach(tool => {
-        const meta = TOOL_META[tool.name] || { displayName: tool.name };
-        const card = document.createElement('div');
-        card.className = `tool-card ${this.selectedTool?.name === tool.name ? 'selected' : ''}`;
-        card.innerHTML = `
-          <div class="tool-card-title">${meta.displayName || tool.name}</div>
-          <div class="tool-card-desc">${tool.description || 'Sem descrição.'}</div>
+      let exibidos = 0;
+      grupos.forEach(g => {
+        const tools = filtered.filter(t => fonteDe(t).grupo === g.id);
+        // Sem token, as ferramentas do Apoia nem chegam a ser listadas: o bloco
+        // fica visível com o aviso, para o usuário saber o que está faltando.
+        const apoiaIndisponivel = g.id === 'apoia' && this.apoiaStatus !== 'ok' && !search;
+        if (!tools.length && !apoiaIndisponivel) return;
+
+        const el = document.createElement('div');
+        el.className = `tool-group ${g.classe}`;
+        el.innerHTML = `
+          <div class="tool-group-head">
+            <span class="tool-group-title">${g.titulo}</span>
+            <span class="tool-group-sub">${g.sub}</span>
+            ${g.extra}
+          </div>
         `;
 
-        card.addEventListener('click', () => this.selectTool(tool));
-        grid.appendChild(card);
+        if (tools.length) {
+          const grid = document.createElement('div');
+          grid.className = 'tools-grid';
+          tools.forEach(tool => {
+            const meta = TOOL_META[tool.name] || { displayName: tool.name };
+            const card = document.createElement('div');
+            card.className = `tool-card ${this.selectedTool?.name === tool.name ? 'selected' : ''}`;
+            card.innerHTML = `
+              <div class="tool-card-title">${meta.displayName || tool.name}</div>
+              <div class="tool-card-desc">${tool.description || 'Sem descrição.'}</div>
+            `;
+            card.addEventListener('click', () => this.selectTool(tool));
+            grid.appendChild(card);
+          });
+          el.appendChild(grid);
+          exibidos += tools.length;
+        } else {
+          const vazio = document.createElement('div');
+          vazio.className = 'group-empty';
+          vazio.innerHTML = this.apoiaStatus === 'loading'
+            ? `<div class="loader"></div> Carregando as ferramentas do Apoia MCP…`
+            : `${ICONS.key} <span>${this.apoiaStatus === 'expired' ? 'Token expirado ou inválido: as ferramentas do Apoia não estão disponíveis.' : this.escapeHtml(this.apoiaMsg || 'Não foi possível conectar ao Apoia MCP.')}</span> <button class="group-link" type="button">Informar token</button>`;
+          vazio.querySelector('button')?.addEventListener('click', () => this.openSettingsPanel({ focusToken: true }));
+          el.appendChild(vazio);
+        }
+        list.appendChild(el);
       });
+
+      if (!exibidos && search) {
+        list.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 16px;">Nenhuma ferramenta encontrada.</div>`;
+      }
+    }
+
+    // Linha de origem no topo da ferramenta: deixa explícito de onde vêm os
+    // dados e se o token do Apoia está em jogo.
+    renderRunnerSource(tool) {
+      const fonte = fonteDe(tool);
+      let nota = fonte.nota;
+      if (fonte.grupo === 'apoia') {
+        nota += this.apoiaStatus === 'ok' ? ' · conectado'
+          : this.apoiaStatus === 'loading' ? ' · conectando…'
+          : this.apoiaStatus === 'expired' ? ' · token expirado' : ' · sem conexão';
+      }
+      this.shadow.getElementById('runnerSource').innerHTML =
+        `<span class="src-chip ${fonte.classe}">${fonte.rotulo}</span><span>${this.escapeHtml(nota)}</span>`;
+      const runner = this.shadow.getElementById('runnerPanel');
+      runner.classList.remove('src-apoia', 'src-trf5');
+      runner.classList.add(fonte.classe);
     }
 
     selectTool(tool) {
       this.selectedTool = tool;
-      this.shadow.getElementById('drawer').classList.add('tool-view');
+      this.setView('runner');
 
-      const runnerPanel = this.shadow.getElementById('runnerPanel');
       const runnerTitle = this.shadow.getElementById('runnerTitle');
       const runnerDesc = this.shadow.getElementById('runnerDesc');
       const noticeContainer = this.shadow.getElementById('dynamicNoticeContainer');
       const meta = TOOL_META[tool.name] || {};
 
-      runnerPanel.style.display = 'flex';
+      this.renderRunnerSource(tool);
       runnerTitle.textContent = meta.displayName || tool.name;
       runnerDesc.textContent = tool.description || '';
 
@@ -2746,14 +3196,11 @@ iniciar();
       this.renderDynamicForm(tool);
       this.shadow.getElementById('resultsBox').style.display = 'none';
       this.toggleMaximizeResults(false);
-      this.shadow.getElementById('drawerBody').scrollTop = 0;
     }
 
     backToToolsList() {
       this.selectedTool = null;
-      this.toggleMaximizeResults(false);
-      this.shadow.getElementById('drawer').classList.remove('tool-view');
-      this.shadow.getElementById('runnerPanel').style.display = 'none';
+      this.setView('tools');
       this.shadow.getElementById('resultsBox').style.display = 'none';
       this.renderToolsGrid(this.shadow.getElementById('toolSearchInput').value);
     }
@@ -2992,15 +3439,19 @@ iniciar();
         this.lastResult = null;
 
         if (err.isAuthError) {
-          this.updateTokenStatus(false, 'Token expirado ou inválido (401)');
+          this.updateTokenStatus('expired', 'Token expirado ou inválido (401)');
           resultsContent.innerHTML = `
             <div class="error-card">
               <div class="error-card-title">${ICONS.alert} Token expirado ou não autorizado</div>
-              <div class="error-card-body">Seu token expirou ou não está autorizado. Obtenha um novo token no portal do Apoia e cole-o no campo de Configurações aberto abaixo.</div>
-              <div style="margin-top: 4px;"><a href="${TOKEN_PORTAL_URL}" target="_blank" class="token-link-btn">Acessar Portal Apoia para Renovar Token ${ICONS.externalLink}</a></div>
+              <div class="error-card-body">Seu token expirou ou não está autorizado. Obtenha um novo token no portal do Apoia e cole-o nas Configurações; ao salvar, você volta para esta ferramenta.</div>
+              <div style="margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap;">
+                <button type="button" class="token-link-btn" data-abrir-config>${ICONS.key} Informar novo token</button>
+                <a href="${TOKEN_PORTAL_URL}" target="_blank" rel="noopener noreferrer" class="token-link-btn">Renovar no portal do Apoia ${ICONS.externalLink}</a>
+              </div>
             </div>
           `;
-          this.openSettingsPanel({ focusToken: true });
+          resultsContent.querySelector('[data-abrir-config]').addEventListener('click', () => this.openSettingsPanel({ focusToken: true }));
+          this.openSettingsPanel({ focusToken: true, alerta: `O Apoia recusou o token ao executar "${(TOOL_META[this.selectedTool.name] || {}).displayName || this.selectedTool.name}". Cole um novo token e salve para voltar à ferramenta.` });
         } else {
           const info = this.selectedTool?.local
             ? { title: this.selectedTool.name === 'buscaProcessualUnificada' ? 'Falha ao consultar o painel do TRF5' : 'Falha ao consultar a Julia (TRF5)', body: err.message || 'Erro desconhecido' }
@@ -3095,189 +3546,280 @@ iniciar();
       }
     }
 
+    // Resume um registro do processMetadata. O PJe devolve um registro por
+    // instância/recurso — e mais um do sistema anterior, quando houve
+    // migração —, todos com o mesmo número (ex.: 1º grau atual, 1º grau
+    // migrado, apelação de 2021 e apelação de 2026).
+    resumirRegistroProcesso(proc) {
+      const movs = (proc.movimentosEDocumentos || [])
+        .map(m => ({ ...m, descricao: corrigirMojibake(m.descricao) }))
+        // Mais recentes primeiro: "Recentes" passa a mostrar de fato as últimas.
+        .sort((a, b) => String(b.dataHora || '').localeCompare(String(a.dataHora || '')));
+      const segundoGrau = proc.instancia === 'SEGUNDO_GRAU';
+      const grau = proc.instancia === 'PRIMEIRO_GRAU' ? '1º grau'
+        : segundoGrau ? '2º grau'
+        : (proc.instancia ? proc.instancia.replace(/_/g, ' ').toLowerCase() : 'Instância não informada');
+      const orgao = movs.find(m => m.orgaoJulgador)?.orgaoJulgador || '';
+      const fim = movs[0]?.dataHora || '';
+      // No 2º grau o registro costuma trazer o histórico do 1º grau copiado
+      // (sem órgão julgador); o recurso começa na primeira movimentação com órgão.
+      const maisAntiga = (segundoGrau && [...movs].reverse().find(m => m.orgaoJulgador)) || movs[movs.length - 1];
+      const inicio = maisAntiga?.dataHora || proc.informacoesGerais?.dataAjuizamento || '';
+      const recentes = movs.slice(0, 3).map(m => m.descricao || m.tipo?.nome || '');
+      let situacao = '';
+      if (/migrad[ao] a tramita/i.test(recentes[0] || '')) situacao = 'Migrado';
+      else if (/remetidos? os autos.*(1º|primeiro)\s*grau/i.test(recentes[0] || '')) situacao = 'Devolvido ao 1º grau';
+      else if (recentes.some(d => /baixa definitiva/i.test(d))) situacao = 'Baixa definitiva';
+      else if (/arquivad/i.test(recentes[0] || '')) situacao = 'Arquivado';
+      return { proc, movs, grau, orgao, inicio, fim, situacao };
+    }
+
     renderProcessMetadata(container, data) {
-      const list = Array.isArray(data) ? data : [data];
+      const list = (Array.isArray(data) ? data : [data]).filter(p => p && typeof p === 'object');
       if (list.length === 0) {
         container.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 16px;">Nenhum metadado processual encontrado.</div>`;
         return;
       }
 
-      list.forEach(proc => {
-        const card = document.createElement('div');
-        card.className = 'proc-card';
+      // Agrupa os registros pelo número: um cartão por processo.
+      const grupos = new Map();
+      list.forEach((proc, i) => {
+        const chave = String(proc.numeroProcesso || '').replace(/\D/g, '') || `sem-numero-${i}`;
+        if (!grupos.has(chave)) grupos.set(chave, []);
+        grupos.get(chave).push(this.resumirRegistroProcesso(proc));
+      });
 
-        const num = proc.numeroProcesso || 'Processo sem número';
-        const tribunal = proc.tribunal?.sigla ? `${proc.tribunal.sigla} (${proc.tribunal.nome || ''})` : 'Tribunal não informado';
-        const instancia = proc.instancia ? proc.instancia.replace(/_/g, ' ') : '';
-        const classe = proc.classe?.descricao ? `${proc.classe.descricao} (Cód. ${proc.classe.codigo})` : 'Não informada';
-        const assunto = proc.assuntos && proc.assuntos.length > 0 ? proc.assuntos.map(a => a.descricao).join(', ') : 'Não informado';
-        
-        let valorCausa = 'Não informado';
-        if (proc.informacoesGerais?.valorAcao !== undefined) {
-          valorCausa = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(proc.informacoesGerais.valorAcao);
-        }
+      grupos.forEach(registros => {
+        // Atividade mais recente primeiro: a primeira aba é onde o processo está agora.
+        registros.sort((a, b) => String(b.fim).localeCompare(String(a.fim)));
+        container.appendChild(this.buildProcessGroupCard(registros));
+      });
+    }
 
-        let ajuizamento = 'Não informada';
-        if (proc.informacoesGerais?.dataAjuizamento) {
-          try {
-            ajuizamento = new Date(proc.informacoesGerais.dataAjuizamento).toLocaleDateString('pt-BR');
-          } catch(e) {
-            ajuizamento = proc.informacoesGerais.dataAjuizamento;
-          }
-        }
+    buildProcessGroupCard(registros) {
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+      const base = registros[0].proc;
+      const num = formatarCnj(base.numeroProcesso) || 'Processo sem número';
+      const tribunal = base.tribunal?.sigla ? `${base.tribunal.sigla} · ${base.tribunal.nome || ''}` : 'Tribunal não informado';
 
-        const ativo = proc.partes?.poloAtivo && proc.partes.poloAtivo.length > 0
-          ? proc.partes.poloAtivo.map(p => `<strong>${p.tipo || 'AUTOR'}:</strong> ${p.nome}`).join('<br>')
-          : 'Polo ativo não detalhado';
-
-        const passivo = proc.partes?.poloPassivo && proc.partes.poloPassivo.length > 0
-          ? proc.partes.poloPassivo.map(p => `<strong>${p.tipo || 'RÉU'}:</strong> ${p.nome}`).join('<br>')
-          : 'Polo passivo não detalhado';
-
-        const allMovs = proc.movimentosEDocumentos || [];
-
-        card.innerHTML = `
-          <div class="proc-header">
-            <div>
-              <div class="proc-num">${num}</div>
-              <div style="font-size: 11px; color: var(--text-muted);">${tribunal} · ${instancia}</div>
-            </div>
-            <span class="badge-court">${proc.tribunal?.sigla || 'JUDICIAL'}</span>
+      const card = document.createElement('div');
+      card.className = 'proc-card';
+      card.innerHTML = `
+        <div class="proc-header">
+          <div>
+            <div class="proc-num">${esc(num)}</div>
+            <div style="font-size: 11px; color: var(--text-muted);">${esc(tribunal)}</div>
           </div>
+          <span class="badge-court">${esc(base.tribunal?.sigla || 'JUDICIAL')}</span>
+        </div>
+      `;
 
-          <div class="proc-grid">
-            <div class="proc-item">
-              <div class="proc-item-label">Classe Processual</div>
-              <div class="proc-item-val">${classe}</div>
-            </div>
-            <div class="proc-item">
-              <div class="proc-item-label">Assunto Principal</div>
-              <div class="proc-item-val">${assunto}</div>
-            </div>
-            <div class="proc-item">
-              <div class="proc-item-label">Valor da Causa</div>
-              <div class="proc-item-val" style="color: var(--text-prazo-val); font-family: var(--font-mono);">${valorCausa}</div>
-            </div>
-            <div class="proc-item">
-              <div class="proc-item-label">Data de Ajuizamento</div>
-              <div class="proc-item-val">${ajuizamento}</div>
-            </div>
+      const detalhe = document.createElement('div');
+      detalhe.className = 'proc-detail';
+
+      if (registros.length > 1) {
+        const porGrau = {};
+        registros.forEach(r => { porGrau[r.grau] = (porGrau[r.grau] || 0) + 1; });
+        const contagem = Object.entries(porGrau).map(([g, n]) => `${n} no ${g}`).join(', ');
+        card.insertAdjacentHTML('beforeend', `
+          <div class="proc-registros-resumo">
+            <strong>${registros.length} registros</strong> para este número (${esc(contagem)}): o PJe guarda um por instância e por recurso — e outro do sistema anterior, quando há migração. Escolha abaixo; o primeiro é o de movimentação mais recente.
           </div>
+        `);
 
-          <div class="proc-parties">
-            <div>${ativo}</div>
-            <div style="border-top: 1px solid var(--border-color); padding-top: 4px; margin-top: 2px;">${passivo}</div>
-          </div>
-
-          <div class="proc-movs-container">
-            <div class="proc-movs-header">
-              <div style="font-size: 11.5px; font-weight: 700; color: var(--text-main);">
-                Movimentações & Peças (${allMovs.length})
-              </div>
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <input type="text" class="proc-movs-filter" placeholder="Filtrar eventos..." />
-                <button class="btn btn-secondary btn-small btn-toggle-movs"></button>
-              </div>
-            </div>
-            <div class="proc-timeline"></div>
-          </div>
-        `;
-
-        const timelineEl = card.querySelector('.proc-timeline');
-        const filterInput = card.querySelector('.proc-movs-filter');
-        const toggleBtn = card.querySelector('.btn-toggle-movs');
-        // No modo expandido a linha do tempo já começa completa.
-        let showAll = this.shadow.getElementById('drawer').classList.contains('results-maximized');
-        const MOVS_RECENTES = 8;
-
-        const updateToggleLabel = () => {
-          toggleBtn.style.display = allMovs.length > MOVS_RECENTES ? '' : 'none';
-          toggleBtn.textContent = showAll ? `Ver Recentes (${MOVS_RECENTES})` : `Ver Todas (${allMovs.length})`;
-        };
-
-        const renderTimelineItems = () => {
-          timelineEl.innerHTML = '';
-          const filterTerm = filterInput.value.toLowerCase().trim();
-
-          const filtered = allMovs.filter(m => {
-            if (!filterTerm) return true;
-            const desc = (m.descricao || m.tipo?.nome || '').toLowerCase();
-            const docs = (m.documentos || []).map(d => (d.nome + ' ' + d.tipoDocumento).toLowerCase()).join(' ');
-            return desc.includes(filterTerm) || docs.includes(filterTerm);
+        const abas = document.createElement('div');
+        abas.className = 'inst-tabs';
+        registros.forEach((r, i) => {
+          const aba = document.createElement('button');
+          aba.type = 'button';
+          aba.className = `inst-tab ${i === 0 ? 'active' : ''}`;
+          const sit = i === 0 && !r.situacao
+            ? `<span class="inst-sit atual">Mais recente</span>`
+            : (r.situacao ? `<span class="inst-sit encerrado">${esc(r.situacao)}</span>` : '');
+          aba.innerHTML = `
+            <span class="inst-tab-top"><span class="inst-grau">${esc(r.grau)}</span>${sit}</span>
+            <span class="inst-tab-classe">${esc(r.proc.classe?.descricao || 'Classe não informada')}</span>
+            <span class="inst-tab-meta" title="${esc(r.orgao)}">${esc(r.orgao || 'Órgão não informado')}</span>
+            <span class="inst-tab-meta">${esc(mesAno(r.inicio))} – ${esc(mesAno(r.fim))} · ${r.movs.length} mov.</span>
+          `;
+          aba.addEventListener('click', () => {
+            abas.querySelectorAll('.inst-tab').forEach(a => a.classList.remove('active'));
+            aba.classList.add('active');
+            this.renderProcessDetail(detalhe, r, true);
           });
+          abas.appendChild(aba);
+        });
+        card.appendChild(abas);
+      }
 
-          // Com filtro ativo, exibe todas as correspondências (a busca já varre
-          // o processo inteiro, não faz sentido cortar em 8).
-          const itemsToDisplay = (showAll || filterTerm) ? filtered : filtered.slice(0, MOVS_RECENTES);
+      card.appendChild(detalhe);
+      this.renderProcessDetail(detalhe, registros[0], registros.length > 1);
+      return card;
+    }
 
-          if (itemsToDisplay.length === 0) {
-            timelineEl.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 8px;">Nenhuma movimentação corresponde ao filtro.</div>`;
-            return;
-          }
+    renderProcessDetail(detalhe, registro, multiplos) {
+      const esc = (s) => this.escapeHtml(String(s ?? ''));
+      const { proc, movs: allMovs, grau, orgao } = registro;
+      const num = String(proc.numeroProcesso || '');
+      const segundoGrau = proc.instancia === 'SEGUNDO_GRAU';
 
-          itemsToDisplay.forEach(m => {
-            const eventDiv = document.createElement('div');
-            eventDiv.className = 'timeline-event';
-            const dateStr = m.dataHora ? m.dataHora.replace('T', ' ').substring(0, 16) : '';
+      const classe = proc.classe?.descricao ? `${proc.classe.descricao} (Cód. ${proc.classe.codigo})` : 'Não informada';
+      const assuntos = [...new Set((proc.assuntos || []).map(a => a.descricao).filter(Boolean))];
+      const assunto = assuntos.length ? assuntos.join(', ') : 'Não informado';
 
-            let docsHtml = '';
-            if (m.documentos && m.documentos.length > 0) {
-              docsHtml = `
-                <div class="timeline-docs">
-                  ${m.documentos.map(doc => `
-                    <div class="doc-item">
-                      <div class="doc-info" title="${doc.nome} (${doc.tipoDocumento || ''})">
-                        ${ICONS.docText}
-                        <span>${doc.nome || 'Documento'}</span>
-                        ${doc.quantidadePaginas ? `<span style="color: var(--text-dim); font-size: 10px;">(${doc.quantidadePaginas} pág.)</span>` : ''}
-                      </div>
-                      <button class="doc-btn-view" data-doc-id="${doc.id}" data-doc-name="${this.escapeHtml(doc.nome || 'Documento')}" data-proc="${num}">
-                        ${ICONS.file} Ler Peça
-                      </button>
+      let valorCausa = 'Não informado';
+      if (proc.informacoesGerais?.valorAcao !== undefined && proc.informacoesGerais?.valorAcao !== null) {
+        valorCausa = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(proc.informacoesGerais.valorAcao);
+      }
+
+      const ajuizamento = formatarDataIso(proc.informacoesGerais?.dataAjuizamento) || 'Não informada';
+
+      const polo = (partes, padrao) => partes && partes.length > 0
+        ? partes.map(p => `<div><strong>${esc(p.tipo || padrao)}:</strong> ${esc(p.nome)}</div>`).join('')
+        : `<div style="color: var(--text-dim);">Não detalhado</div>`;
+
+      detalhe.innerHTML = `
+        <div class="proc-detail-head">
+          <strong>${esc(grau)}</strong>${orgao ? ' · ' + esc(orgao) : ''}${multiplos ? '' : ` · ${allMovs.length} movimentações`}
+        </div>
+
+        <div class="proc-grid">
+          <div class="proc-item">
+            <div class="proc-item-label">Classe Processual</div>
+            <div class="proc-item-val">${esc(classe)}</div>
+          </div>
+          <div class="proc-item">
+            <div class="proc-item-label">${assuntos.length > 1 ? 'Assuntos' : 'Assunto Principal'}</div>
+            <div class="proc-item-val">${esc(assunto)}</div>
+          </div>
+          <div class="proc-item">
+            <div class="proc-item-label">Valor da Causa</div>
+            <div class="proc-item-val" style="color: var(--text-prazo-val); font-family: var(--font-mono);">${esc(valorCausa)}</div>
+          </div>
+          <div class="proc-item">
+            <div class="proc-item-label">${segundoGrau ? 'Autuação' : 'Data de Ajuizamento'}</div>
+            <div class="proc-item-val">${esc(ajuizamento)}</div>
+          </div>
+        </div>
+
+        <div class="proc-parties">
+          <div>
+            <div class="proc-polo-label">Polo ativo</div>
+            ${polo(proc.partes?.poloAtivo, 'AUTOR')}
+          </div>
+          <div style="border-top: 1px solid var(--border-color); padding-top: 4px; margin-top: 2px;">
+            <div class="proc-polo-label">Polo passivo</div>
+            ${polo(proc.partes?.poloPassivo, 'RÉU')}
+          </div>
+        </div>
+
+        <div class="proc-movs-container">
+          <div class="proc-movs-header">
+            <div style="font-size: 11.5px; font-weight: 700; color: var(--text-main);">
+              Movimentações & Peças (${allMovs.length}) <span style="font-weight: 400; color: var(--text-dim);">· mais recentes primeiro</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <input type="text" class="proc-movs-filter" placeholder="Filtrar eventos..." />
+              <button class="btn btn-secondary btn-small btn-toggle-movs"></button>
+            </div>
+          </div>
+          <div class="proc-timeline"></div>
+        </div>
+      `;
+
+      const timelineEl = detalhe.querySelector('.proc-timeline');
+      const filterInput = detalhe.querySelector('.proc-movs-filter');
+      const toggleBtn = detalhe.querySelector('.btn-toggle-movs');
+      // No modo expandido a linha do tempo já começa completa.
+      let showAll = this.shadow.getElementById('drawer').classList.contains('results-maximized');
+      const MOVS_RECENTES = 8;
+
+      const updateToggleLabel = () => {
+        toggleBtn.style.display = allMovs.length > MOVS_RECENTES ? '' : 'none';
+        toggleBtn.textContent = showAll ? `Ver Recentes (${MOVS_RECENTES})` : `Ver Todas (${allMovs.length})`;
+      };
+
+      const renderTimelineItems = () => {
+        timelineEl.innerHTML = '';
+        const filterTerm = filterInput.value.toLowerCase().trim();
+
+        const filtered = allMovs.filter(m => {
+          if (!filterTerm) return true;
+          const desc = (m.descricao || m.tipo?.nome || '').toLowerCase();
+          const docs = (m.documentos || []).map(d => (d.nome + ' ' + d.tipoDocumento).toLowerCase()).join(' ');
+          return desc.includes(filterTerm) || docs.includes(filterTerm);
+        });
+
+        // Com filtro ativo, exibe todas as correspondências (a busca já varre
+        // o processo inteiro, não faz sentido cortar em 8).
+        const itemsToDisplay = (showAll || filterTerm) ? filtered : filtered.slice(0, MOVS_RECENTES);
+
+        if (itemsToDisplay.length === 0) {
+          timelineEl.innerHTML = `<div style="text-align: center; color: var(--text-dim); padding: 8px;">Nenhuma movimentação corresponde ao filtro.</div>`;
+          return;
+        }
+
+        itemsToDisplay.forEach(m => {
+          const eventDiv = document.createElement('div');
+          eventDiv.className = 'timeline-event';
+          const dateStr = m.dataHora ? m.dataHora.replace('T', ' ').substring(0, 16) : '';
+
+          let docsHtml = '';
+          if (m.documentos && m.documentos.length > 0) {
+            docsHtml = `
+              <div class="timeline-docs">
+                ${m.documentos.map(doc => `
+                  <div class="doc-item">
+                    <div class="doc-info" title="${esc(doc.nome)} (${esc(doc.tipoDocumento || '')})">
+                      ${ICONS.docText}
+                      <span>${esc(doc.nome || 'Documento')}</span>
+                      ${doc.quantidadePaginas ? `<span style="color: var(--text-dim); font-size: 10px;">(${doc.quantidadePaginas} pág.)</span>` : ''}
                     </div>
-                  `).join('')}
-                </div>
-              `;
-            }
-
-            eventDiv.innerHTML = `
-              <div class="timeline-date">${dateStr} ${m.responsavel ? '· ' + m.responsavel : ''}</div>
-              <div class="timeline-desc">${m.descricao || m.tipo?.nome || 'Movimentação'}</div>
-              ${docsHtml}
+                    <button class="doc-btn-view" data-doc-id="${esc(doc.id)}" data-doc-name="${esc(doc.nome || 'Documento')}" data-proc="${esc(num)}">
+                      ${ICONS.file} Ler Peça
+                    </button>
+                  </div>
+                `).join('')}
+              </div>
             `;
+          }
 
-            eventDiv.querySelectorAll('.doc-btn-view').forEach(btn => {
-              btn.addEventListener('click', () => {
-                const docId = btn.dataset.docId;
-                const docName = btn.dataset.docName;
-                const procNumber = btn.dataset.proc;
-                this.openPieceViewer(procNumber, docId, docName);
-              });
+          eventDiv.innerHTML = `
+            <div class="timeline-date">${esc(dateStr)} ${m.responsavel ? '· ' + esc(m.responsavel) : ''}</div>
+            <div class="timeline-desc">${esc(m.descricao || m.tipo?.nome || 'Movimentação')}</div>
+            ${docsHtml}
+          `;
+
+          eventDiv.querySelectorAll('.doc-btn-view').forEach(btn => {
+            btn.addEventListener('click', () => {
+              this.openPieceViewer(btn.dataset.proc, btn.dataset.docId, btn.dataset.docName);
             });
-
-            timelineEl.appendChild(eventDiv);
           });
-        };
 
-        filterInput.addEventListener('input', () => renderTimelineItems());
-        toggleBtn.addEventListener('click', () => {
-          showAll = !showAll;
-          updateToggleLabel();
-          renderTimelineItems();
+          timelineEl.appendChild(eventDiv);
         });
-        // Expandir/recolher o painel alterna junto entre todas e recentes.
-        card.classList.add('has-movs-toggle');
-        card.addEventListener('apoia-maximize', (e) => {
-          if (showAll === e.detail) return;
-          showAll = e.detail;
-          updateToggleLabel();
-          renderTimelineItems();
-        });
+      };
 
+      filterInput.addEventListener('input', () => renderTimelineItems());
+      toggleBtn.addEventListener('click', () => {
+        showAll = !showAll;
         updateToggleLabel();
         renderTimelineItems();
-        container.appendChild(card);
       });
+      // Expandir/recolher o painel alterna junto entre todas e recentes. O
+      // contêiner é reaproveitado entre abas: troca o ouvinte da aba anterior.
+      detalhe.classList.add('has-movs-toggle');
+      if (detalhe._apoiaMaximize) detalhe.removeEventListener('apoia-maximize', detalhe._apoiaMaximize);
+      detalhe._apoiaMaximize = (e) => {
+        if (showAll === e.detail) return;
+        showAll = e.detail;
+        updateToggleLabel();
+        renderTimelineItems();
+      };
+      detalhe.addEventListener('apoia-maximize', detalhe._apoiaMaximize);
+
+      updateToggleLabel();
+      renderTimelineItems();
     }
 
     // Ferramentas locais (sem MCP): devolvem o mesmo formato de callTool.
@@ -3408,32 +3950,80 @@ iniciar();
         return;
       }
 
-      const iNumero = colunas.indexOf('Número do Processo');
-      const th = colunas.map(c => `<th>${esc(c)}</th>`).join('');
-      const tb = linhas.map(r => `<tr>${r.map((v, i) => {
-        const titulo = colunas[i];
-        if (titulo === 'Consulta') {
-          const url = String(v || '');
-          if (!/^https?:\/\//i.test(url)) return `<td>${esc(url)}</td>`;
-          const numero = iNumero >= 0 ? String(r[iNumero] || '') : '';
-          if (numero && consultaPjeAutomatizavel(url)) {
-            return `<td style="white-space: nowrap;"><button class="doc-btn-view" data-apoia-acompanhar="1" data-url="${esc(url)}" data-num="${esc(numero)}" title="Abre a consulta pública do sistema numa aba nova, já com o número preenchido, pesquisa disparada e o detalhe do processo aberto.">${ICONS.search} Acompanhar</button></td>`;
-          }
-          return `<td><a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Este sistema não tem o formulário do PJe — a busca tem de ser feita lá." style="color: var(--primary-accent);">Abrir</a></td>`;
-        }
-        if (titulo === 'Número do Processo') {
-          return `<td style="font-family: var(--font-mono); white-space: nowrap;">${esc(v)}</td>`;
-        }
-        if (titulo === 'Pessoa') {
-          const tipo = v === 'F' ? 'Física' : (v === 'J' ? 'Jurídica' : v);
-          return `<td style="white-space: nowrap;">${esc(tipo)}</td>`;
-        }
-        return `<td>${esc(v)}</td>`;
-      }).join('')}</tr>`).join('');
+      // O painel devolve uma linha por parte × autuação: o mesmo processo
+      // aparece em várias autuações (1º grau, recurso no 2º grau, sistema
+      // anterior à migração), cada uma repetindo número, classe e sistema em
+      // todas as partes. Agrupa por autuação: cabeçalho com os dados do
+      // processo e, abaixo, só as partes.
+      const PARTE = ['Nome', 'Sujeito Processual', 'Pessoa', 'CPF/CNPJ'];
+      const idx = (t) => colunas.indexOf(t);
+      const val = (r, t) => (idx(t) >= 0 ? String(r[idx(t)] ?? '') : '');
+      const colsAutuacao = colunas.filter(c => !PARTE.includes(c));
+      const colsParte = colunas.filter(c => PARTE.includes(c));
 
+      const autuacoes = new Map();
+      linhas.forEach(r => {
+        const chave = colsAutuacao.map(c => val(r, c)).join('\u0001');
+        if (!autuacoes.has(chave)) autuacoes.set(chave, { r, partes: [] });
+        autuacoes.get(chave).partes.push(r);
+      });
+
+      const dataOrd = (s) => { const m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s || ''); return m ? m[3] + m[2] + m[1] : s; };
+      const grupos = [...autuacoes.values()].sort((a, b) =>
+        val(a.r, 'Número do Processo').localeCompare(val(b.r, 'Número do Processo')) ||
+        val(a.r, 'Grau').localeCompare(val(b.r, 'Grau')) ||
+        dataOrd(val(a.r, '1ª Distribuição')).localeCompare(dataOrd(val(b.r, '1ª Distribuição'))) ||
+        val(a.r, 'Sistema').localeCompare(val(b.r, 'Sistema')));
+
+      // Polo ativo, polo passivo, demais e, por último, advogados/procuradores.
+      const ordemPapel = (p) => /^(AUTOR|REQUERENTE|APELANTE|RECORRENTE|EXEQUENTE|IMPETRANTE|EMBARGANTE|AGRAVANTE)/i.test(p) ? 0
+        : /^(R[EÉ]U|REQUERIDO|APELADO|RECORRIDO|EXECUTADO|IMPETRADO|EMBARGADO|AGRAVADO)/i.test(p) ? 1
+        : /ADVOGADO|PROCURADOR|DEFENSOR/i.test(p) ? 3 : 2;
+
+      const acaoConsulta = (url, numero) => {
+        if (!/^https?:\/\//i.test(url)) return url ? `<span>${esc(url)}</span>` : '';
+        if (numero && consultaPjeAutomatizavel(url)) {
+          return `<button class="doc-btn-view" data-apoia-acompanhar="1" data-url="${esc(url)}" data-num="${esc(numero)}" title="Abre a consulta pública do sistema numa aba nova, já com o número preenchido, pesquisa disparada e o detalhe do processo aberto.">${ICONS.search} Acompanhar</button>`;
+        }
+        return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Este sistema não tem o formulário do PJe — a busca tem de ser feita lá." style="color: var(--primary-accent); font-weight: 600;">Abrir consulta ${ICONS.externalLink}</a>`;
+      };
+
+      const celulaParte = (titulo, v) => {
+        if (titulo === 'Pessoa') return `<td style="white-space: nowrap;">${esc(v === 'F' ? 'Física' : (v === 'J' ? 'Jurídica' : v))}</td>`;
+        if (titulo === 'CPF/CNPJ') return `<td style="white-space: nowrap; font-family: var(--font-mono); font-size: 11px;">${esc(v)}</td>`;
+        return `<td>${esc(v)}</td>`;
+      };
+
+      const tb = grupos.map(({ r, partes }) => {
+        const numero = val(r, 'Número do Processo');
+        const classe = val(r, 'Classe Judicial');
+        const instancia = val(r, 'Instância');
+        const grau = val(r, 'Grau');
+        const info = [
+          [val(r, 'Sistema'), val(r, 'Seção')].filter(Boolean).join(' · '),
+          classe && classe !== '-' ? classe : 'Classe não informada',
+          val(r, '1ª Distribuição') ? `1ª distribuição ${val(r, '1ª Distribuição')}` : ''
+        ].filter(Boolean).map(esc).join(' · ');
+        const cabecalhoGrupo = `
+          <tr class="grp-row"><td colspan="${colsParte.length}">
+            <div class="grp-head">
+              <span class="proc-num" style="font-size: 12px;">${esc(numero)}</span>
+              <span class="badge-court">${esc(grau)}${instancia && instancia !== grau ? ' · ' + esc(instancia) : ''}</span>
+              <span class="grp-info">${info}</span>
+              <span class="grp-acao">${acaoConsulta(val(r, 'Consulta'), numero)}</span>
+            </div>
+          </td></tr>`;
+        const corpo = [...partes]
+          .sort((a, b) => ordemPapel(val(a, 'Sujeito Processual')) - ordemPapel(val(b, 'Sujeito Processual')))
+          .map(p => `<tr>${colsParte.map(c => celulaParte(c, val(p, c))).join('')}</tr>`).join('');
+        return cabecalhoGrupo + corpo;
+      }).join('');
+
+      const nProcessos = new Set(grupos.map(g => val(g.r, 'Número do Processo'))).size;
       card.innerHTML = cabecalho + `
+        <div class="proc-registros-resumo">${esc(String(linhas.length))} linha(s) em <strong>${grupos.length} autuação(ões)</strong>${nProcessos > 1 ? ` de ${nProcessos} processos` : ''} — cada autuação (1º grau, recurso no 2º grau, sistema anterior à migração) aparece com as suas partes.</div>
         <div style="overflow-x: auto;">
-          <table class="data-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>
+          <table class="data-table"><thead><tr>${colsParte.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${tb}</tbody></table>
         </div>
         ${data?.truncado ? `<div class="julia-dec-sub">Exibindo ${esc(String(linhas.length))} de ${esc(String(data.total))} registros — aumente o "limite" para ver mais.</div>` : ''}
         <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). Em "Acompanhar", o assistente abre a consulta pública do sistema (pje1g, pje2g ou pjett) numa aba nova, preenche o número, dispara a pesquisa e abre o detalhe do processo.</div>
@@ -3855,10 +4445,14 @@ iniciar();
     convertToMarkdown(toolName, data) {
       if (!data) return '';
       if (toolName === 'processMetadata') {
-        const list = Array.isArray(data) ? data : [data];
-        return list.map(proc => {
-          let out = `## Processo: ${proc.numeroProcesso || ''}\n`;
+        const list = (Array.isArray(data) ? data : [data]).filter(p => p && typeof p === 'object');
+        return list.map(p => this.resumirRegistroProcesso(p))
+          .sort((a, b) => String(b.fim).localeCompare(String(a.fim)))
+          .map(({ proc, grau, orgao, inicio, fim, situacao }) => {
+          let out = `## Processo: ${formatarCnj(proc.numeroProcesso) || ''} — ${grau}\n`;
           out += `- **Tribunal:** ${proc.tribunal?.sigla || ''} (${proc.tribunal?.nome || ''})\n`;
+          if (orgao) out += `- **Órgão julgador:** ${orgao}\n`;
+          out += `- **Período:** ${mesAno(inicio)} a ${mesAno(fim)}${situacao ? ` (${situacao})` : ''}\n`;
           out += `- **Classe:** ${proc.classe?.descricao || ''}\n`;
           if (proc.assuntos?.[0]) out += `- **Assunto:** ${proc.assuntos[0].descricao}\n`;
           if (proc.informacoesGerais?.valorAcao) out += `- **Valor da Causa:** R$ ${proc.informacoesGerais.valorAcao}\n`;
@@ -3976,10 +4570,12 @@ iniciar();
 
       this.history.forEach(item => {
         const card = document.createElement('div');
+        const fonte = fonteDe({ name: item.toolName });
+        const nome = (TOOL_META[item.toolName] || {}).displayName || item.toolName;
         card.style.cssText = 'background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 4px; padding: 8px 10px; cursor: pointer;';
         card.innerHTML = `
-          <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px;">
-            <strong style="color: var(--primary-accent);">${item.toolName}</strong>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 2px;">
+            <span style="display: flex; align-items: center; gap: 6px;"><span class="src-chip ${fonte.classe}">${fonte.rotulo}</span><strong style="color: var(--text-main);">${this.escapeHtml(nome)}</strong></span>
             <span style="color: var(--text-dim);">${item.date}</span>
           </div>
           <div style="font-size: 10.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
@@ -3990,21 +4586,15 @@ iniciar();
         card.addEventListener('click', () => {
           const tool = this.tools.find(t => t.name === item.toolName);
           if (tool) {
-            this.switchViewToRunner();
             this.selectTool(tool);
             this.populateFormValues(item.args);
+          } else {
+            this.showToast('Ferramenta indisponível no momento (token do Apoia expirado?).');
           }
         });
 
         list.appendChild(card);
       });
-    }
-
-    switchViewToRunner() {
-      this.shadow.getElementById('settingsPanel').style.display = 'none';
-      this.shadow.getElementById('historyPanel').style.display = 'none';
-      this.shadow.getElementById('btnSettings').classList.remove('active');
-      this.shadow.getElementById('btnHistory').classList.remove('active');
     }
 
     // Alterna o modo expandido dos resultados: oculta o formulário e a grade
@@ -4089,7 +4679,9 @@ iniciar();
           const drawer = this.shadow.getElementById('drawer');
           if (overlay && overlay.style.display === 'flex') {
             this.closePieceViewer();
-          } else if (this.isOpen && drawer.classList.contains('tool-view')) {
+          } else if (this.isOpen && (this.view === 'settings' || this.view === 'history')) {
+            this.closePanel();
+          } else if (this.isOpen && this.view === 'runner') {
             this.backToToolsList();
           } else if (this.isOpen) {
             this.toggleDrawer(false);
@@ -4108,7 +4700,6 @@ iniciar();
           navTabs.forEach(t => t.classList.remove('active'));
           tab.classList.add('active');
           this.currentTab = tab.dataset.tab;
-          this.switchViewToRunner();
           this.backToToolsList();
         });
       });
@@ -4132,47 +4723,49 @@ iniciar();
       this.shadow.getElementById('btnInsertCursor').addEventListener('click', () => this.insertIntoActiveCursor());
       this.shadow.getElementById('btnMaximizeResults').addEventListener('click', () => this.toggleMaximizeResults());
 
-      const btnSettings = this.shadow.getElementById('btnSettings');
-      const settingsPanel = this.shadow.getElementById('settingsPanel');
-      btnSettings.addEventListener('click', () => {
-        const isShown = settingsPanel.style.display === 'flex';
-        if (isShown) {
-          settingsPanel.style.display = 'none';
-          btnSettings.classList.remove('active');
-        } else {
-          this.openSettingsPanel();
-        }
+      // Ícones do cabeçalho alternam: um segundo clique volta para onde estava.
+      this.shadow.getElementById('btnSettings').addEventListener('click', () => {
+        if (this.view === 'settings') this.closePanel();
+        else this.openSettingsPanel({ alerta: this.apoiaStatus === 'expired' ? 'Token expirado ou inválido. Cole um novo token e salve.' : '' });
       });
 
-      this.shadow.getElementById('btnSaveConfig').addEventListener('click', () => {
+      this.shadow.querySelectorAll('[data-panel-back]').forEach(btn => {
+        btn.addEventListener('click', () => this.closePanel());
+      });
+
+      // Salvar testa o token na hora: se o Apoia aceitar, volta para onde o
+      // usuário estava (ex.: a ferramenta que falhou com 401); senão, fica aqui.
+      this.shadow.getElementById('btnSaveConfig').addEventListener('click', async () => {
         const tokenVal = this.shadow.getElementById('cfgTokenInput').value.trim();
         const urlVal = this.shadow.getElementById('cfgUrlInput').value.trim();
         const themeVal = this.shadow.getElementById('cfgThemeSelect').value;
         this.client.setCredentials(urlVal, tokenVal);
         this.applyTheme(themeVal, false);
-        this.showToast('Configurações e tema salvos.');
-        this.loadTools();
+        this.setSettingsAlert('');
+        this.showToast('Configurações salvas. Verificando o token...');
+        const ok = await this.loadTools({ abrirConfigSeExpirado: false });
+        if (ok) {
+          this.showToast('Token aceito — conectado ao Apoia MCP.');
+          if (this.view === 'settings') this.closePanel();
+        } else {
+          this.setSettingsAlert(this.apoiaStatus === 'expired'
+            ? 'O Apoia recusou este token (expirado ou inválido). Gere um novo no portal e cole aqui.'
+            : `Não foi possível conectar ao Apoia MCP: ${this.apoiaMsg}`);
+        }
       });
 
       this.shadow.getElementById('btnTestConfig').addEventListener('click', async () => {
         this.showToast('Testando conexão com o Apoia MCP...');
-        await this.loadTools();
+        const ok = await this.loadTools({ abrirConfigSeExpirado: false });
+        this.setSettingsAlert(ok ? '' : (this.apoiaStatus === 'expired' ? 'Token expirado ou inválido.' : `Sem conexão: ${this.apoiaMsg}`));
+        if (ok) this.showToast('Conexão OK — token aceito pelo Apoia MCP.');
       });
 
-      const btnHistory = this.shadow.getElementById('btnHistory');
-      const historyPanel = this.shadow.getElementById('historyPanel');
-      btnHistory.addEventListener('click', () => {
-        const isShown = historyPanel.style.display === 'flex';
-        this.shadow.getElementById('settingsPanel').style.display = 'none';
-        this.shadow.getElementById('btnSettings').classList.remove('active');
-
-        if (isShown) {
-          historyPanel.style.display = 'none';
-          btnHistory.classList.remove('active');
+      this.shadow.getElementById('btnHistory').addEventListener('click', () => {
+        if (this.view === 'history') {
+          this.closePanel();
         } else {
-          this.toggleMaximizeResults(false);
-          historyPanel.style.display = 'flex';
-          btnHistory.classList.add('active');
+          this.setView('history');
           this.renderHistoryList();
         }
       });
