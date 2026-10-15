@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.12.0
+// @version      1.13.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -2671,6 +2671,21 @@ iniciar();
       gap: 6px 8px;
     }
 
+    /* Selo do sistema de origem da autuação (Tebas, PJe 1, PJe 2…). */
+    .badge-sis {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 3px;
+      white-space: nowrap;
+      color: var(--text-muted);
+      background: color-mix(in srgb, currentColor 12%, transparent);
+      border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    }
+    .badge-sis.sis-tebas { color: #d97706; }
+    .badge-sis.sis-pje1 { color: #a855f7; }
+    .badge-sis.sis-pje2 { color: var(--ok); }
+
     .grp-info {
       font-size: 11px;
       color: var(--text-muted);
@@ -4062,6 +4077,26 @@ iniciar();
         return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Para este sistema a busca tem de ser feita lá." style="color: var(--primary-accent); font-weight: 600;">Abrir consulta ${ICONS.externalLink}</a>`;
       };
 
+      // O painel chama o PJe antigo de "PJe" e o novo de "PJe 2.x"; o link da
+      // consulta é o que distingue com certeza (o PJe 1.x fica em /pje/).
+      const seloSistema = (sistema, url) => {
+        const s = String(sistema || '');
+        const u = String(url || '');
+        let cls = '', rot = s, dica = 'Sem preenchimento automático: a busca é feita na página do sistema.';
+        if (CONSULTA_TEBAS.test(u) || /^tebas$/i.test(s)) {
+          cls = 'sis-tebas'; rot = 'Tebas';
+          dica = 'Tebas (consulta processual da seção). Acompanhar preenche o número e pesquisa sozinho.';
+        } else if (/\/pje\/ConsultaPublica\//i.test(u) || (!u && /^pje$/i.test(s))) {
+          cls = 'sis-pje1'; rot = 'PJe 1';
+          dica = 'PJe 1.x. Acompanhar preenche o número; a consulta pede captcha (digite e tecle Enter).';
+        } else if (CONSULTA_PJE_LISTA.test(u) || /^pje\s*2/i.test(s)) {
+          cls = 'sis-pje2'; rot = 'PJe 2';
+          dica = 'PJe 2.x. Acompanhar pesquisa sozinho e abre o detalhe do processo.';
+        }
+        if (!rot) return '';
+        return `<span class="badge-sis ${cls}" title="${esc(dica)}">${esc(rot)}</span>`;
+      };
+
       const celulaParte = (titulo, v) => {
         if (titulo === 'Pessoa') return `<td style="white-space: nowrap;">${esc(v === 'F' ? 'Física' : (v === 'J' ? 'Jurídica' : v))}</td>`;
         if (titulo === 'CPF/CNPJ') return `<td style="white-space: nowrap; font-family: var(--font-mono); font-size: 11px;">${esc(v)}</td>`;
@@ -4074,7 +4109,7 @@ iniciar();
         const instancia = val(r, 'Instância');
         const grau = val(r, 'Grau');
         const info = [
-          [val(r, 'Sistema'), val(r, 'Seção')].filter(Boolean).join(' · '),
+          val(r, 'Seção'),
           classe && classe !== '-' ? classe : 'Classe não informada',
           val(r, '1ª Distribuição') ? `1ª distribuição ${val(r, '1ª Distribuição')}` : ''
         ].filter(Boolean).map(esc).join(' · ');
@@ -4083,6 +4118,7 @@ iniciar();
             <div class="grp-head">
               <span class="proc-num" style="font-size: 12px;">${esc(numero)}</span>
               <span class="badge-court">${esc(grau)}${instancia && instancia !== grau ? ' · ' + esc(instancia) : ''}</span>
+              ${seloSistema(val(r, 'Sistema'), val(r, 'Consulta'))}
               <span class="grp-info">${info}</span>
               <span class="grp-acao">${acaoConsulta(val(r, 'Consulta'), numero)}</span>
             </div>
