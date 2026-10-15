@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apoia PDPJ - Assistente MCP
 // @namespace    https://apoia.pdpj.jus.br/
-// @version      1.11.0
+// @version      1.12.0
 // @description  Painel lateral acionável via Alt+M para ferramentas MCP do Apoia/PDPJ (Metadados de Processos, Leitura de Peças, Decisões da Julia/TRF5, Busca Processual Unificada/TRF5, Documentos da Biblioteca, Jurisprudência Pangea, Inteiro Teor de Precedentes, Prazos e Cálculos) com temas Escuro, Claro e Sépia.
 // @author       Antigravity / Apoia PDPJ
 // @updateURL    https://raw.githubusercontent.com/jusgador/mcp-apoia-script/master/apoia-mcp-assistant.user.js
@@ -709,17 +709,25 @@ iniciar();
   // preenche o campo "Processo", dispara a pesquisa e abre o detalhe — o mesmo
   // que se faria à mão. No TRF5 o reCAPTCHA está desativado no próprio site
   // (a função executarReCaptcha tem "if (false)"), então o clique funciona
-  // por script. Só os sistemas PJe (pje1g, pje2g, pjett) têm esse formulário —
-  // Creta, Tebas e SEEU são outros sistemas e abrem pelo link comum.
+  // por script. O PJe 1.x (pje.jfce, pje.trf5… em /pje/ConsultaPublica) tem
+  // captcha de imagem de verdade: lá o número é preenchido e o foco vai para o
+  // captcha — o usuário digita os caracteres e tecla Enter, e o resto segue
+  // igual. O Tebas (consulta processual em ASP das seções) não tem captcha e é
+  // automatizado por inteiro. Creta e SEEU continuam pelo link comum.
   const CONSULTA_MARCA_HASH = 'apoia-consulta=';
-  const CONSULTA_PJE_LISTA = /\/pjeconsulta\/ConsultaPublica\/listView\.seam/i;
+  const CONSULTA_PJE_LISTA = /\/(pjeconsulta|pje)\/ConsultaPublica\/listView\.seam/i;
   const CONSULTA_PJE_DETALHE = '/pjeconsulta/ConsultaPublica/DetalheProcessoConsultaPublica/listView.seam?ca=';
+  const CONSULTA_TEBAS = /\/consultaProcessual\/cons_proc[as]\.asp/i;
 
-  function consultaPjeAutomatizavel(url) {
-    return CONSULTA_PJE_LISTA.test(String(url || ''));
+  // 'pje', 'tebas' ou null (sistema sem automação).
+  function tipoConsultaAutomatizavel(url) {
+    const u = String(url || '');
+    if (CONSULTA_PJE_LISTA.test(u)) return 'pje';
+    if (CONSULTA_TEBAS.test(u)) return 'tebas';
+    return null;
   }
 
-  function abrirAcompanhamentoPje(url, numero) {
+  function abrirAcompanhamento(url, numero) {
     const destino = String(url || '').split('#')[0] + '#' + CONSULTA_MARCA_HASH + encodeURIComponent(numero);
     window.open(destino, '_blank', 'noopener');
   }
@@ -763,18 +771,52 @@ iniciar();
     return [...vistos];
   }
 
+  function botaoPesquisar() {
+    return [...document.querySelectorAll('input[type="button"], input[type="submit"], button')]
+      .find((e) => /^\s*pesquisar\s*$/i.test(e.value || e.textContent || ''));
+  }
+
+  function preencherCampo(campo, valor) {
+    campo.focus();
+    campo.value = valor;
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    campo.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // PJe 1.x: o captcha é re-renderizado por AJAX a cada tentativa, então o
+  // Enter é ouvido no documento (e não no campo) e aciona o "Pesquisar".
+  function aguardarCaptchaPje(campo, captcha, botao, aviso) {
+    // A máscara do campo "Processo" devolve o foco a ele logo depois do
+    // preenchimento; o foco no captcha vai depois que ela assenta.
+    campo.blur();
+    setTimeout(() => {
+      captcha.focus();
+      try { captcha.scrollIntoView({ block: 'center' }); } catch (e) { /* ignore */ }
+    }, 400);
+    aviso.atualizar('Apoia MCP: número preenchido. Digite os caracteres da imagem e tecle Enter.');
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' || !/verifyCaptcha$/.test(ev.target?.id || '')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      (document.getElementById(botao.id) || botao).click();
+      aviso.atualizar('Apoia MCP: pesquisando o processo…');
+    }, true);
+  }
+
   async function automatizarConsultaPje(numero) {
-    if (!CONSULTA_PJE_LISTA.test(location.pathname)) return;
     const aviso = avisoConsulta(`Apoia MCP: preenchendo a busca do processo ${numero}…`);
     try {
+      // PJe 2.x (pje1g/pje2g/pjett) e PJe 1.x têm o campo com nomes diferentes.
       const campo = await esperarPor(
-        () => document.querySelector('input[id$="numProcesso-inputNumeroProcesso"]') || document.querySelector('input[name*="numProcesso"]'),
+        () => document.querySelector('input[id$="numProcesso-inputNumeroProcesso"]')
+          || document.querySelector('input[name*="numProcesso"]')
+          || document.querySelector('input[id$=":Processo:ProcessoDecoration:Processo"]'),
         30000
       );
       const botao = await esperarPor(
         () => document.getElementById('fPP:searchProcessos')
-          || [...document.querySelectorAll('input[type="button"], input[type="submit"], button')]
-            .find((e) => /pesquisar/i.test(e.value || e.textContent || '')),
+          || document.getElementById('consultaPublicaForm:pesq')
+          || botaoPesquisar(),
         30000
       );
       if (!campo || !botao) {
@@ -782,16 +824,21 @@ iniciar();
         return;
       }
 
-      campo.focus();
-      campo.value = numero;
-      campo.dispatchEvent(new Event('input', { bubbles: true }));
-      campo.dispatchEvent(new Event('change', { bubbles: true }));
-      aviso.atualizar('Apoia MCP: pesquisando o processo…');
-      botao.click();
+      preencherCampo(campo, numero);
+      const captcha = document.querySelector('input[id$="verifyCaptcha"]');
+      if (captcha) {
+        aguardarCaptchaPje(campo, captcha, botao, aviso);
+      } else {
+        aviso.atualizar('Apoia MCP: pesquisando o processo…');
+        botao.click();
+      }
 
-      const codigos = await esperarPor(() => { const l = codigosDetalhe(); return l.length ? l : null; }, 40000);
+      // Com captcha, dá tempo de o usuário digitar (e errar e repetir).
+      const codigos = await esperarPor(() => { const l = codigosDetalhe(); return l.length ? l : null; }, captcha ? 600000 : 40000);
       if (!codigos) {
-        aviso.remover('Apoia MCP: a pesquisa foi enviada, mas não voltou resultado. Confira o número.');
+        aviso.remover(captcha
+          ? 'Apoia MCP: a pesquisa não foi concluída. Confira o captcha e o número.'
+          : 'Apoia MCP: a pesquisa foi enviada, mas não voltou resultado. Confira o número.');
         return;
       }
       if (codigos.length > 1) {
@@ -805,6 +852,25 @@ iniciar();
     }
   }
 
+  // Tebas: formulário ASP simples, sem captcha. O "Pesquisar" posta e a página
+  // de resultado já mostra o processo (com as partes e a localização).
+  async function automatizarConsultaTebas(numero) {
+    const aviso = avisoConsulta(`Apoia MCP: preenchendo a busca do processo ${numero}…`);
+    try {
+      const campo = await esperarPor(() => document.querySelector('input[name="NumProc"]'), 30000);
+      const botao = await esperarPor(botaoPesquisar, 30000);
+      if (!campo || !botao) {
+        aviso.remover('Apoia MCP: não localizei o campo ou o botão de pesquisa nesta página.');
+        return;
+      }
+      preencherCampo(campo, numero);
+      aviso.atualizar('Apoia MCP: pesquisando o processo…');
+      botao.click();
+    } catch (e) {
+      aviso.remover('Apoia MCP: não consegui automatizar a consulta nesta página.');
+    }
+  }
+
   function iniciarAtalhoConsulta() {
     if (window.top !== window) return;
     if (!location.hash.includes(CONSULTA_MARCA_HASH)) return;
@@ -812,7 +878,9 @@ iniciar();
     if (!numero) return;
     // Limpa a marca: um recarregamento manual volta à página normal.
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
-    automatizarConsultaPje(numero);
+    const tipo = tipoConsultaAutomatizavel(location.pathname);
+    if (tipo === 'pje') automatizarConsultaPje(numero);
+    else if (tipo === 'tebas') automatizarConsultaTebas(numero);
   }
 
   // ==========================================
@@ -3982,10 +4050,16 @@ iniciar();
 
       const acaoConsulta = (url, numero) => {
         if (!/^https?:\/\//i.test(url)) return url ? `<span>${esc(url)}</span>` : '';
-        if (numero && consultaPjeAutomatizavel(url)) {
-          return `<button class="doc-btn-view" data-apoia-acompanhar="1" data-url="${esc(url)}" data-num="${esc(numero)}" title="Abre a consulta pública do sistema numa aba nova, já com o número preenchido, pesquisa disparada e o detalhe do processo aberto.">${ICONS.search} Acompanhar</button>`;
+        const tipo = numero ? tipoConsultaAutomatizavel(url) : null;
+        if (tipo) {
+          const dica = tipo === 'tebas'
+            ? 'Abre a consulta do Tebas numa aba nova, já com o número preenchido e a pesquisa disparada.'
+            : (/\/pje\/ConsultaPublica\//i.test(url)
+              ? 'Abre a consulta pública do PJe numa aba nova com o número preenchido. Este sistema pede captcha: digite os caracteres da imagem e tecle Enter; o detalhe do processo abre em seguida.'
+              : 'Abre a consulta pública do sistema numa aba nova, já com o número preenchido, pesquisa disparada e o detalhe do processo aberto.');
+          return `<button class="doc-btn-view" data-apoia-acompanhar="1" data-url="${esc(url)}" data-num="${esc(numero)}" title="${esc(dica)}">${ICONS.search} Acompanhar</button>`;
         }
-        return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Este sistema não tem o formulário do PJe — a busca tem de ser feita lá." style="color: var(--primary-accent); font-weight: 600;">Abrir consulta ${ICONS.externalLink}</a>`;
+        return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Abre a consulta pública do sistema (${esc(url)}). Para este sistema a busca tem de ser feita lá." style="color: var(--primary-accent); font-weight: 600;">Abrir consulta ${ICONS.externalLink}</a>`;
       };
 
       const celulaParte = (titulo, v) => {
@@ -4026,11 +4100,11 @@ iniciar();
           <table class="data-table"><thead><tr>${colsParte.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${tb}</tbody></table>
         </div>
         ${data?.truncado ? `<div class="julia-dec-sub">Exibindo ${esc(String(linhas.length))} de ${esc(String(data.total))} registros — aumente o "limite" para ver mais.</div>` : ''}
-        <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). Em "Acompanhar", o assistente abre a consulta pública do sistema (pje1g, pje2g ou pjett) numa aba nova, preenche o número, dispara a pesquisa e abre o detalhe do processo.</div>
+        <div class="julia-dec-sub">Documento das partes mascarado, como na tela. Fonte: painel "Busca Processual Unificada" (Portal BI/TRF5). Em "Acompanhar", o assistente abre a consulta pública do sistema numa aba nova e preenche o número: no PJe 2.x (pje1g, pje2g, pjett) e no Tebas dispara a pesquisa sozinho; no PJe 1.x, que pede captcha, basta digitar os caracteres da imagem e teclar Enter. No PJe, o detalhe do processo abre em seguida.</div>
       `;
 
       card.querySelectorAll('[data-apoia-acompanhar]').forEach(btn => {
-        btn.addEventListener('click', () => abrirAcompanhamentoPje(btn.dataset.url, btn.dataset.num));
+        btn.addEventListener('click', () => abrirAcompanhamento(btn.dataset.url, btn.dataset.num));
       });
       container.appendChild(card);
     }
